@@ -1,0 +1,14 @@
+dataset: abc
+data: cholec
+lr: 1e-4
+model_name: resnet50
+num_classes: 80
+workers: 8
+thre: 0.5
+batch_size: 128 #128
+log_file: train.txt
+epochs: 60
+total_epochs: 80
+weight_decay: 1e-4
+checkpoint: base
+test: false

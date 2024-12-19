@@ -1,0 +1,10 @@
+__pycache__/
+backup.txt
+triplet.txt
+soso.sh
+preds.json
+*.tar
+*.gz
+env.cfg
+triplet_train_labels.json
+triplet_val_labels.json
