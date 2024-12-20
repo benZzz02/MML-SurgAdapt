@@ -1,0 +1,10 @@
+numpy
+tqdm
+omegaconf
+scikit-learn
+ivtmetrics
+ftfy
+randaugment
+pycocotools
+gensim
+transformers
