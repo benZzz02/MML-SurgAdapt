@@ -6,9 +6,9 @@ This repository contains the codebase for **MML - SurgAdapt**, an adaptation of 
 
 ## Table of Contents
 1. [Environment Setup](#environment-setup)
-2. [Running Training](#running-training)
-3. [Running Inference](#running-inference)
-4. [Information regarding Configs](#information-regarding-configs)
+2. [Data Setup](#data-setup)
+3. [Running Training](#running-training)
+4. [Running Inference](#running-inference)
 5. [Pretrained Weights](#pretrained-weights)
 
 ---
@@ -32,6 +32,27 @@ Follow these steps to set up the environment:
    conda install pytorch==2.2.2 torchvision==0.17.2 torchaudio==2.2.2 pytorch-cuda=12.1 -c pytorch -c nvidia
    pip install -r requirements.txt
 
+## Data Setup
+
+Set up your data in the cholec directory as follows:
+```
+cholec/
+├── data/
+│   ├── cholec80/ # Phase recognition
+│   ├── endoscapes/ # CVS assessment
+│   ├── cholect50/ # Triplet recognition
+│   ├── triplet_data/ # Optional: For model initialization with LatentGraph pseudolabels
+│   └── triplet_val_data/ # Optional: For model initialization with LatentGraph pseudolabels
+├── cholec_labels_index.npy
+├── cholec_labels.txt
+├── cholec_super_labels.txt
+└── word2vec_similarity_matrix.npy
+```
+
+Set up the configs for training and testing in the `configs/surgadapt+cholec.yaml`:  
+Batch size, lr, epochs, dir, loss, backbone, seed, flags for SP validation, Pseudolabel initialization, Label file, init/getitem, partial positive setup.  
+For evaluation, specify checkpoint, dir, and loss.
+
 ## Running Training
 
 For training the model, use the config file `configs/surgadapt+cholec.yaml` to set the configuration for training and run:
@@ -46,10 +67,27 @@ For testing the model, use the config file `configs/surgadapt+cholec.yaml` to se
 python test.py
 ```
 
-## Information regarding Configs
-
-Coming soon ...
-
 ## Pretrained Weights
 
-Coming soon ...
+Model weights have been saved as follows:
+```
+MMLSurgAdapt_checkpoints/
+├── Baselines/ # One ckpt file each
+│   ├── R50/
+│   ├── CLIP-VitL/
+│   ├── DualCoop/
+│   ├── VLPL/
+│   ├── HSPNet/
+│   ├── Multi-task/
+│   └── Task-specific/
+│       ├── R50/ # 1 ckpt per dataset
+│       └── CLIP/ # 1 ckpt per dataset
+├── Loss_experiments/ # All loss functions here, one ckpt each
+├── SP Hill/ # Single positive, 5 ckpts
+├── SP WAN/ # 5 ckpts
+├── SP SPLC/ # 5 ckpts
+├── PP Hill/ # Partial positive, 5 ckpts
+├── PP WAN/ # 5 ckpts
+└── PP SPLC/ # 5 ckpts
+```
+
