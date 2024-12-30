@@ -4,7 +4,7 @@ parser = argparse.ArgumentParser(description='PyTorch MS_COCO Training')
 parser.add_argument('-c',
                     '--config-file',
                     help='config file',
-                    default='configs/hspnet+cholect50.yaml',
+                    default='configs/r50+endo.yaml',
                     type=str)
 parser.add_argument('-t',
                     '--test',

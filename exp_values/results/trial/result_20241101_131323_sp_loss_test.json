@@ -1,0 +1,32 @@
+{
+    "Test": true,
+    "Cholec80": {
+        "F1_score": 2.136349355953503,
+        "F1_score_EMA": null,
+        "Per_video_f1": {
+            "cholec80_video51": 2.136349355953503
+        },
+        "Per_video_f1_EMA": null
+    },
+    "Endoscapes": {
+        "mAP": 66.66666666666667,
+        "mAP_EMA": null,
+        "mAP_per_class": {
+            "C0": 100.0,
+            "C1": 100.0,
+            "C2": -0.0
+        },
+        "mAP_per_class_EMA": null
+    },
+    "CholecT50": {
+        "AP": {
+            "AP_i": 26.57293576581034,
+            "AP_v": 16.36026183594086,
+            "AP_t": 13.786000388684567,
+            "AP_iv": 9.968942019154657,
+            "AP_it": 6.97749372492524,
+            "AP_ivt": 5.937501460053084
+        },
+        "AP_EMA": null
+    }
+}

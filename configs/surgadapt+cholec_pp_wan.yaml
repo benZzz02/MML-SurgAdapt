@@ -44,4 +44,4 @@ model: SurgAdapt
 # Testing
 ckpt: temp.ckpt  # Ckpt path for inference
 test_dir: trial_test # Directory to save results
-test_loss: Hill  # Loss function
+test_loss: WAN  # Loss function
