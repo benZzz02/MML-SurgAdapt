@@ -55,16 +55,16 @@ For evaluation, specify checkpoint, dir, and loss.
 
 ## Running Training
 
-For training the model, use the config file `configs/surgadapt+cholec.yaml` to set the configuration for training and run:
+For training the model, use the config file given for each experiment to set the configuration for training and run, for example:
 ```bash
-python train.py
+python train.py -c configs/surgadapt+cholec_pp_hill.yaml
 ```
 
 ## Running Inference
 
-For testing the model, use the config file `configs/surgadapt+cholec.yaml` to set the configuration for testing and run:
+For testing the model, use the config file given for each experiment to set the configuration (change the directory for saving results) for testing and run, for example:
 ```bash
-python test.py
+python test.py -c configs/surgadapt+cholec_pp_hill.yaml
 ```
 
 ## Pretrained Weights
