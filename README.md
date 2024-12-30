@@ -10,6 +10,7 @@ This repository contains the codebase for **MML - SurgAdapt**, an adaptation of 
 3. [Running Training](#running-training)
 4. [Running Inference](#running-inference)
 5. [Pretrained Weights](#pretrained-weights)
+6. [Run Baselines](#run-baselines)
 
 ---
 
@@ -89,5 +90,25 @@ MMLSurgAdapt_checkpoints/
 ├── PP Hill/ # Partial positive, 5 ckpts
 ├── PP WAN/ # 5 ckpts
 └── PP SPLC/ # 5 ckpts
+```
+
+## Run Baselines
+
+For DualCoOp, use the README file to set up the environment, set the data folder as given above (not in `cholec/`).  
+```bash
+cd baselines/Dualcoop/
+python train.py
+```
+
+For Task-specific baselines, use config files for the experiments after setting up the data, as above (in `cholec/`).
+```bash
+cd baselines/TS+multitask/
+python train.py -c configs/r50+endo.yaml
+```
+
+For multi-task baseline:
+```bash
+cd baselines/TS+multitask/
+python train_multitask.py
 ```
 
