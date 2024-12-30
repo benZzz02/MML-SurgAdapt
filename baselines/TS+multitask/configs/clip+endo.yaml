@@ -1,0 +1,25 @@
+n_ctx: 4
+checkpoint: endoscapes
+log_file: hspnet+endo.txt
+model_name: clip_gcn
+lr: 0.00002
+epochs: 15
+gcn_lr: 0.0005
+reweight_p: 0.2
+relation_file: cholec/endo_similarity_matrix.npy
+ratio: 1
+parent_n_ctx: 4
+parent_ctx_init: a photo of a
+child_n_ctx: 4
+child_ctx_init: a photo
+meta_lr: 0.0005
+change_epoch: 1
+tau: 0.6
+image_size: 224
+num_classes: 3
+super_labels: cholec/cholec_super_labels.txt
+super_labels_index: cholec/cholec_labels_index.npy
+child_num: 3
+label_file : label_jsons/data1.json
+dir: "ppt_baselines/endo_clip"
+model: CLIP

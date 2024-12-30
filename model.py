@@ -59,89 +59,6 @@ class TextEncoder(nn.Module):
               tokenized_prompts.argmax(dim=-1)] @ self.text_projection
 
         return x
-    
-# class AdapterLearner(nn.Module):
-#     def __init__(self, classnames, clip_model):
-#         super().__init__()
-#         self.n_cls = len(classnames)
-#         clip_imsize = clip_model.visual.input_resolution
-#         cfg_imsize = cfg.INPUT.SIZE
-#         print(f"cfg imsize : {cfg_imsize}")
-#         print(f"clip_imsize : {clip_imsize}")
-#         assert cfg_imsize == clip_imsize, f"cfg_imsize ({cfg_imsize}) must equal to clip_imsize ({clip_imsize})"
-
-#         self.text_adapter_func = lambda x: self.return_text_adapter(index=x)
-#         self.text_adapter = self._build_adapter(
-#             clip_model.ln_final.weight.shape[0], 
-#             len(clip_model.transformer.resblocks), 
-#             cfg.TRAINER.MMADAPTER.ADAPTER_START,
-#             cfg.TRAINER.MMADAPTER.ADAPTER_END,
-#             cfg.TRAINER.MMADAPTER.ADAPTER_DIM,
-#             clip_model.dtype
-#         )
-        
-#         self.visual_adapter_func = lambda x: self.return_visual_adapter(index=x)
-#         self.visual_adapter = self._build_adapter(
-#             clip_model.visual.ln_post.weight.shape[0],
-#             len(clip_model.visual.transformer.resblocks), 
-#             cfg.TRAINER.MMADAPTER.ADAPTER_START,
-#             cfg.TRAINER.MMADAPTER.ADAPTER_END,
-#             cfg.TRAINER.MMADAPTER.ADAPTER_DIM,
-#             clip_model.dtype
-#         )
-
-#         self.shared_adapter = self._build_adapter(
-#             cfg.TRAINER.MMADAPTER.ADAPTER_DIM,
-#             len(clip_model.visual.transformer.resblocks), 
-#             cfg.TRAINER.MMADAPTER.ADAPTER_START,
-#             cfg.TRAINER.MMADAPTER.ADAPTER_END,
-#             cfg.TRAINER.MMADAPTER.ADAPTER_DIM,
-#             clip_model.dtype
-#         )
-
-#         self.adapter_scale = float(cfg.TRAINER.MMADAPTER.ADAPTER_SCALE)
-
-#     def return_text_adapter(self, index):
-#         return self.text_adapter[index], self.shared_adapter[index], self.adapter_scale
-
-#     def return_visual_adapter(self, index):
-#         return self.visual_adapter[index], self.shared_adapter[index], self.adapter_scale
-
-#     def _build_adapter(self, d_model, n_layers, l_start, l_end, mid_dim, dtype):
-
-#         adapter = [None] * (n_layers + 1)
-#         for i in range(l_start, l_end+1):
-#             if mid_dim == d_model:
-#                 adapter[i] = nn.Sequential(
-#                     nn.Linear(d_model, mid_dim),
-#                     nn.ReLU()
-#                 )
-#             else:
-#                 adapter[i] = nn.Sequential(OrderedDict([
-#                     ("down", nn.Sequential(nn.Linear(d_model, mid_dim), nn.ReLU())),
-#                     ("up", nn.Linear(mid_dim, d_model))
-#                 ]))
-#         adapter = nn.ModuleList([a for a in adapter])
-#         for m in adapter.modules():
-#             if isinstance(m, nn.Linear):
-#                 nn.init.kaiming_normal_(m.weight, mode="fan_out", nonlinearity="relu")
-#                 nn.init.constant_(m.bias, 0)
-
-#         if dtype == torch.float16:
-#             for m in adapter.modules():
-#                 m.half()
-    
-#         return adapter
-    
-#     def forward(self,embedding):
-#         if self.text_adapter[0] is not None:
-#             token_embedding = self.text_adapter[0].down(embedding)
-#             shared_adapter = self.shared_adapter[0]
-#             token_embedding = shared_adapter(token_embedding)
-#             token_embedding = self.text_adapter[0].up(token_embedding)
-#             embedding = embedding + self.adapter_scale * token_embedding
-                     
-#         return embedding, self.text_adapter_func, self.visual_adapter_func
 
 class ParentPromptLearner(nn.Module):
 
@@ -859,61 +776,61 @@ class CLIP_for_train(nn.Module):
         logits = logit_scale * image_features @ text_features.t()
         return logits
     
-# class HSPNet(nn.Module):
+class HSPNet(nn.Module):
 
-#     def __init__(self, classnames, clip_model):
-#         super().__init__()
-#         self.parent_prompt_learner = ParentPromptLearner(None, clip_model)
-#         self.child_prompt_learner = ChildPromptLearner(classnames, clip_model)
-#         self.parent_tokenized_prompts = self.parent_prompt_learner.tokenized_prompts
-#         self.child_tokeninzed_prompts = self.child_prompt_learner.tokenized_prompts
-#         self.image_encoder = clip_model.visual
-#         self.text_encoder = TextEncoder(clip_model)
-#         self.logit_scale = clip_model.logit_scale
-#         self.dtype = clip_model.dtype
+    def __init__(self, classnames, clip_model):
+        super().__init__()
+        self.parent_prompt_learner = ParentPromptLearner(None, clip_model)
+        self.child_prompt_learner = ChildPromptLearner(classnames, clip_model)
+        self.parent_tokenized_prompts = self.parent_prompt_learner.tokenized_prompts
+        self.child_tokeninzed_prompts = self.child_prompt_learner.tokenized_prompts
+        self.image_encoder = clip_model.visual
+        self.text_encoder = TextEncoder(clip_model)
+        self.logit_scale = clip_model.logit_scale
+        self.dtype = clip_model.dtype
 
-#         self.gcn = GCN()
+        self.gcn = GCN()
 
-#         self.relation = torch.Tensor(np.load(cfg.relation_file))
-#         self.parent_index = np.load(cfg.super_labels_index)
-#         self.parent_index = torch.Tensor(self.parent_index).type(torch.long)
+        self.relation = torch.Tensor(np.load(cfg.relation_file))
+        self.parent_index = np.load(cfg.super_labels_index)
+        self.parent_index = torch.Tensor(self.parent_index).type(torch.long)
 
-#         child = self.relation[:cfg.child_num, :cfg.child_num].clone()
-#         parent = self.relation[cfg.child_num:, cfg.child_num:].clone()
-#         child = self.split(child)
-#         parent = self.split(parent)
+        child = self.relation[:cfg.child_num, :cfg.child_num].clone()
+        parent = self.relation[cfg.child_num:, cfg.child_num:].clone()
+        child = self.split(child)
+        parent = self.split(parent)
         
-#         self.parent_self = parent.clone()
-#         self.relation = child
+        self.parent_self = parent.clone()
+        self.relation = child
 
-#     def split(self, relation):
-#         _ ,max_idx = torch.topk(relation, int(3/4 * len(relation)))
-#         mask = torch.ones_like(relation).type(torch.bool)
-#         for i, idx in enumerate(max_idx):
-#             mask[i][idx] = 0
-#         relation[mask] = 0
-#         dialog = torch.eye(len(relation)).type(torch.bool)
-#         relation[dialog] = 0
-#         relation = relation / torch.sum(relation, dim=1).reshape(-1, 1) * cfg.reweight_p 
-#         relation[dialog] = (1-cfg.reweight_p)
-#         return relation
+    def split(self, relation):
+        _ ,max_idx = torch.topk(relation, int(3/4 * len(relation)))
+        mask = torch.ones_like(relation).type(torch.bool)
+        for i, idx in enumerate(max_idx):
+            mask[i][idx] = 0
+        relation[mask] = 0
+        dialog = torch.eye(len(relation)).type(torch.bool)
+        relation[dialog] = 0
+        relation = relation / torch.sum(relation, dim=1).reshape(-1, 1) * cfg.reweight_p 
+        relation[dialog] = (1-cfg.reweight_p)
+        return relation
     
-#     def forward(self, image):
-#         image_features = self.image_encoder(image.type(self.dtype))
-#         image_features = image_features / image_features.norm(dim=-1,
-#                                                               keepdim=True)
-#         parent_prompts = self.parent_prompt_learner()
-#         parent_text_features = self.text_encoder(parent_prompts, self.parent_tokenized_prompts)
+    def forward(self, image):
+        image_features = self.image_encoder(image.type(self.dtype))
+        image_features = image_features / image_features.norm(dim=-1,
+                                                              keepdim=True)
+        parent_prompts = self.parent_prompt_learner()
+        parent_text_features = self.text_encoder(parent_prompts, self.parent_tokenized_prompts)
         
-#         parent_text_features = self.gcn(parent_text_features, self.parent_self)
-#         child_prompts = self.child_prompt_learner(parent_text_features)
-#         child_text_features = self.text_encoder(child_prompts, self.child_tokeninzed_prompts)
+        parent_text_features = self.gcn(parent_text_features, self.parent_self)
+        child_prompts = self.child_prompt_learner(parent_text_features)
+        child_text_features = self.text_encoder(child_prompts, self.child_tokeninzed_prompts)
 
-#         text_features = child_text_features
+        text_features = child_text_features
 
-#         text_features = self.gcn(text_features, self.relation)
+        text_features = self.gcn(text_features, self.relation)
         
-#         text_features = text_features / text_features.norm(dim=-1,
-#                                                             keepdim=True)
-#         logits = 10 * image_features @ text_features.t()
-#         return logits
+        text_features = text_features / text_features.norm(dim=-1,
+                                                            keepdim=True)
+        logits = 10 * image_features @ text_features.t()
+        return logits

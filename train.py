@@ -16,7 +16,7 @@ import torch.nn.functional
 from torch.optim import lr_scheduler
 
 from log import logger
-from loss import SPLC, GRLoss, Hill, AsymmetricLossOptimized, WAN, VLPL_Loss, iWAN, G_AN, LL, Weighted_Hill
+from loss import SPLC, GRLoss, Hill, AsymmetricLossOptimized, WAN, VLPL_Loss, iWAN, G_AN, LL, Weighted_Hill, Modified_VLPL
 from mmlsurgadapt import MMLSurgAdaptTrainer
 from utils import AverageMeter, add_weight_decay, mAP
 import warnings
@@ -331,26 +331,23 @@ def validate(trainer, epoch: int, dir) -> Tuple[float, bool]:
     trainer.model.eval()
     logger.info("Start validation...")
 
-    if cfg.loss == 'SPLC':
-        criterion = SPLC()
-    if cfg.loss == 'GRLoss':
-        criterion = GRLoss()
-    if cfg.loss == 'Hill':
-        criterion = Hill()
-    if cfg.loss == 'ASL':
-        criterion = AsymmetricLossOptimized()
-    if cfg.loss == 'WAN':
-        criterion = WAN()
-    if cfg.loss == 'VLPL_Loss':
-        criterion = VLPL_Loss()
-    if cfg.loss == 'iWAN':
-        criterion = iWAN()
-    if cfg.loss == 'G-AN':
-        criterion = G_AN()
-    if cfg.loss == 'LL':
-        criterion = LL()
-    if cfg.loss == 'Weighted_Hill':
-        criterion = Weighted_Hill()
+    loss_dict = {
+        'SPLC': SPLC,
+        'GRLoss': GRLoss,
+        'Hill': Hill,
+        'BCE': lambda: AsymmetricLossOptimized(gamma_neg=0, gamma_pos=0, clip=0),
+        'Focal': lambda: AsymmetricLossOptimized(gamma_neg=2, gamma_pos=2, clip=0),
+        'ASL': lambda: AsymmetricLossOptimized(gamma_neg=4, gamma_pos=0, clip=0.05),
+        'WAN': WAN,
+        'VLPL_Loss': VLPL_Loss,
+        'Modified_VLPL': Modified_VLPL,
+        'iWAN': iWAN,
+        'G-AN': G_AN,
+        'LL-R': lambda: LL(scheme='LL-R'),
+        'LL-Ct': LL,
+        'Weighted_Hill': Weighted_Hill
+    }
+    criterion = loss_dict.get(cfg.loss, lambda: None)()
     
     sigmoid = torch.sigmoid
     preds_regular = []
@@ -495,26 +492,23 @@ def save_best_init(trainer, if_ema_better,dir):
 
 def train(trainer,dir) -> None:
     # set optimizer
-    if cfg.loss == 'SPLC':
-        criterion = SPLC()
-    if cfg.loss == 'GRLoss':
-        criterion = GRLoss()
-    if cfg.loss == 'Hill':
-        criterion = Hill()
-    if cfg.loss == 'ASL':
-        criterion = AsymmetricLossOptimized()
-    if cfg.loss == 'WAN':
-        criterion = WAN()
-    if cfg.loss == 'VLPL_Loss':
-        criterion = VLPL_Loss()
-    if cfg.loss == 'iWAN':
-        criterion = iWAN()
-    if cfg.loss == 'G-AN':
-        criterion = G_AN()
-    if cfg.loss == 'LL':
-        criterion = LL()
-    if cfg.loss == 'Weighted_Hill':
-        criterion = Weighted_Hill()
+    loss_dict = {
+        'SPLC': SPLC,
+        'GRLoss': GRLoss,
+        'Hill': Hill,
+        'BCE': lambda: AsymmetricLossOptimized(gamma_neg=0, gamma_pos=0, clip=0),
+        'Focal': lambda: AsymmetricLossOptimized(gamma_neg=2, gamma_pos=2, clip=0),
+        'ASL': lambda: AsymmetricLossOptimized(gamma_neg=4, gamma_pos=0, clip=0.05),
+        'WAN': WAN,
+        'VLPL_Loss': VLPL_Loss,
+        'Modified_VLPL': Modified_VLPL,
+        'iWAN': iWAN,
+        'G-AN': G_AN,
+        'LL-R': lambda: LL(scheme='LL-R'),
+        'LL-Ct': LL,
+        'Weighted_Hill': Weighted_Hill
+    }
+    criterion = loss_dict.get(cfg.loss, lambda: None)()
     print(criterion)
     parameters = add_weight_decay(trainer.model, cfg.weight_decay)
     optimizer = torch.optim.Adam(

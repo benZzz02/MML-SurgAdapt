@@ -1,0 +1,100 @@
+of the tool grasper performing the action dissect on the target cystic plate
+of the tool grasper performing the action dissect on the target gallbladder
+of the tool grasper performing the action dissect on the target omentum
+of the tool grasper performing the action grasp on the target cystic artery
+of the tool grasper performing the action grasp on the target cystic duct
+of the tool grasper performing the action grasp on the target cystic pedicle
+of the tool grasper performing the action grasp on the target cystic plate
+of the tool grasper performing the action grasp on the target gallbladder
+of the tool grasper performing the action grasp on the target gut
+of the tool grasper performing the action grasp on the target liver
+of the tool grasper performing the action grasp on the target omentum
+of the tool grasper performing the action grasp on the target peritoneum
+of the tool grasper performing the action grasp on the target specimen bag
+of the tool grasper performing the action pack on the target gallbladder
+of the tool grasper performing the action retract on the target cystic duct
+of the tool grasper performing the action retract on the target cystic pedicle
+of the tool grasper performing the action retract on the target cystic plate
+of the tool grasper performing the action retract on the target gallbladder
+of the tool grasper performing the action retract on the target gut
+of the tool grasper performing the action retract on the target liver
+of the tool grasper performing the action retract on the target omentum
+of the tool grasper performing the action retract on the target peritoneum
+of the tool bipolar performing the action coagulate on the target abdominal wall cavity
+of the tool bipolar performing the action coagulate on the target blood vessel
+of the tool bipolar performing the action coagulate on the target cystic artery
+of the tool bipolar performing the action coagulate on the target cystic duct
+of the tool bipolar performing the action coagulate on the target cystic pedicle
+of the tool bipolar performing the action coagulate on the target cystic plate
+of the tool bipolar performing the action coagulate on the target gallbladder
+of the tool bipolar performing the action coagulate on the target liver
+of the tool bipolar performing the action coagulate on the target omentum
+of the tool bipolar performing the action coagulate on the target peritoneum
+of the tool bipolar performing the action dissect on the target adhesion
+of the tool bipolar performing the action dissect on the target cystic artery
+of the tool bipolar performing the action dissect on the target cystic duct
+of the tool bipolar performing the action dissect on the target cystic plate
+of the tool bipolar performing the action dissect on the target gallbladder
+of the tool bipolar performing the action dissect on the target omentum
+of the tool bipolar performing the action grasp on the target cystic plate
+of the tool bipolar performing the action grasp on the target liver
+of the tool bipolar performing the action grasp on the target specimen bag
+of the tool bipolar performing the action retract on the target cystic duct
+of the tool bipolar performing the action retract on the target cystic pedicle
+of the tool bipolar performing the action retract on the target gallbladder
+of the tool bipolar performing the action retract on the target liver
+of the tool bipolar performing the action retract on the target omentum
+of the tool hook performing the action coagulate on the target blood vessel
+of the tool hook performing the action coagulate on the target cystic artery
+of the tool hook performing the action coagulate on the target cystic duct
+of the tool hook performing the action coagulate on the target cystic pedicle
+of the tool hook performing the action coagulate on the target cystic plate
+of the tool hook performing the action coagulate on the target gallbladder
+of the tool hook performing the action coagulate on the target liver
+of the tool hook performing the action coagulate on the target omentum
+of the tool hook performing the action cut on the target blood vessel
+of the tool hook performing the action cut on the target peritoneum
+of the tool hook performing the action dissect on the target blood vessel
+of the tool hook performing the action dissect on the target cystic artery
+of the tool hook performing the action dissect on the target cystic duct
+of the tool hook performing the action dissect on the target cystic plate
+of the tool hook performing the action dissect on the target gallbladder
+of the tool hook performing the action dissect on the target omentum
+of the tool hook performing the action dissect on the target peritoneum
+of the tool hook performing the action retract on the target gallbladder
+of the tool hook performing the action retract on the target liver
+of the tool scissors performing the action coagulate on the target omentum
+of the tool scissors performing the action cut on the target adhesion
+of the tool scissors performing the action cut on the target blood vessel
+of the tool scissors performing the action cut on the target cystic artery
+of the tool scissors performing the action cut on the target cystic duct
+of the tool scissors performing the action cut on the target cystic plate
+of the tool scissors performing the action cut on the target liver
+of the tool scissors performing the action cut on the target omentum
+of the tool scissors performing the action cut on the target peritoneum
+of the tool scissors performing the action dissect on the target cystic plate
+of the tool scissors performing the action dissect on the target gallbladder
+of the tool scissors performing the action dissect on the target omentum
+of the tool clipper performing the action clip on the target blood vessel
+of the tool clipper performing the action clip on the target cystic artery
+of the tool clipper performing the action clip on the target cystic duct
+of the tool clipper performing the action clip on the target cystic pedicle
+of the tool clipper performing the action clip on the target cystic plate
+of the tool irrigator performing the action aspirate on the target fluid
+of the tool irrigator performing the action dissect on the target cystic duct
+of the tool irrigator performing the action dissect on the target cystic pedicle
+of the tool irrigator performing the action dissect on the target cystic plate
+of the tool irrigator performing the action dissect on the target gallbladder
+of the tool irrigator performing the action dissect on the target omentum
+of the tool irrigator performing the action irrigate on the target abdominal wall cavity
+of the tool irrigator performing the action irrigate on the target cystic pedicle
+of the tool irrigator performing the action irrigate on the target liver
+of the tool irrigator performing the action retract on the target gallbladder
+of the tool irrigator performing the action retract on the target liver
+of the tool irrigator performing the action retract on the target omentum
+of the tool grasper performing the action null verb on the target null target
+of the tool bipolar performing the action null verb on the target null target
+of the tool hook performing the action null verb on the target null target
+of the tool scissors performing the action null verb on the target null target
+of the tool clipper performing the action null verb on the target null target
+of the tool irrigator performing the action null verb on the target null target

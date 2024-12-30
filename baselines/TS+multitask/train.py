@@ -7,7 +7,6 @@ from statistics import mean
 import ivtmetrics
 from datetime import datetime
 import json
-import argparse, sys
 import random
 
 import torch
@@ -15,18 +14,15 @@ from torch.cuda.amp import GradScaler, autocast  # type: ignore
 import torch.nn.functional
 from torch.optim import lr_scheduler
 
-from loss import SPLC, GRLoss, Hill, AsymmetricLossOptimized, WAN, VLPL_Loss, iWAN, G_AN, LL, Weighted_Hill, Modified_VLPL
-from mmlsurgadapt import MMLSurgAdaptTrainer
+from log import logger
+from loss import SPLC
+from hspnet import HSPNetTrainer
 from utils import AverageMeter, add_weight_decay, mAP
 import warnings
 
-from config import cfg
+from config import cfg  # isort:skip
 
 def process_cholec80(true,pred,pred_ema,video_ids,test):
-
-    true = true[:,:7]
-    pred = pred[:,:7]
-    pred_ema = pred_ema[:,:7]
 
     unique_ids = np.unique(video_ids)
     video_f1s = {}
@@ -56,44 +52,12 @@ def process_cholec80(true,pred,pred_ema,video_ids,test):
 
     return f1_score_reg, f1_score_ema, video_f1s, video_f1s_ema
 
-def process_endo(true,pred,pred_ema,video_ids, test):
-
-    true = true[:,7:10]
-    pred = pred[:,7:10]
-    pred_ema = pred_ema[:,7:10]
-
-    num_classes = true.shape[1]
-
-    per_class_map = {}
-    per_class_map_ema = {}
-
-    for label in range(num_classes):
-        avg_precision = average_precision_score(
-            true[:, label], pred[:, label]
-        )
-        avg_precision_ema  = average_precision_score(
-            true[:, label], pred_ema[:, label]
-        )
-        per_class_map[f"C{label}"] = avg_precision * 100.0
-        per_class_map_ema[f"C{label}"] = avg_precision_ema * 100
-    
-    mean_ap = mean(per_class_map.values())
-    mean_ap_ema = mean(per_class_map_ema.values())
-
-    if test == True:
-        return mean_ap, None, per_class_map, None
-
-    return mean_ap, mean_ap_ema, per_class_map, per_class_map_ema
-
 def resolve_nan(classwise):
         classwise[classwise==-0.0] = np.nan
         return classwise
 
 def process_cholect50(true,pred,pred_ema,video_ids,test):
 
-    true = true[:,10:]
-    pred = pred[:,10:]
-    pred_ema = pred_ema[:,10:]
     unique_vids = np.unique(video_ids)
 
     ap_i_list = []
@@ -239,36 +203,49 @@ def process_cholect50(true,pred,pred_ema,video_ids,test):
 
     return aps, aps_ema
 
-def save_results(a,b,c,test,dir):
+def process_endo(true,pred,pred_ema,video_ids, test):
 
-    cholec80_data = {
-        "F1_score" : a[0],
-        "F1_score_EMA" : a[1],
-        "Per_video_f1" : a[2],
-        "Per_video_f1_EMA" : a[3]
-    }
+    num_classes = true.shape[1]
 
-    endo_data = {
-        "mAP" : b[0],
-        "mAP_EMA" : b[1],
-        "mAP_per_class" : b[2],
-        "mAP_per_class_EMA" : b[3]
-    }
+    per_class_map = {}
+    per_class_map_ema = {}
 
-    cholect50_data = {
-        "AP" : c[0],
-        "AP_EMA" : c[1]
-    }
+    for label in range(num_classes):
+        avg_precision = average_precision_score(
+            true[:, label], pred[:, label]
+        )
+        avg_precision_ema  = average_precision_score(
+            true[:, label], pred_ema[:, label]
+        )
+        per_class_map[f"C{label}"] = avg_precision * 100.0
+        per_class_map_ema[f"C{label}"] = avg_precision_ema * 100
+    
+    mean_ap = mean(per_class_map.values())
+    mean_ap_ema = mean(per_class_map_ema.values())
+
+    if test == True:
+        return mean_ap, None, per_class_map, None
+
+    return mean_ap, mean_ap_ema, per_class_map, per_class_map_ema
+
+
+def save_results(a,test,dir):
+
+    if 'cholec80' in cfg.checkpoint:
+        dataset = "Cholec80"
+    elif 'endo' in cfg.checkpoint:
+        dataset = "Endoscapes"
+    else:
+        dataset = "CholecT50"
 
     data = {
         "Test" : test,
-        "Cholec80" : cholec80_data,
-        "Endoscapes" : endo_data,
-        "CholecT50" : cholect50_data
+        "Dataset" : dataset,
+        "Results" : a
     }
 
     folder_name = f"results/{dir}"
-    os.makedirs(folder_name, exist_ok=True)
+    os.makedirs(f"results/{dir}",exist_ok=True)
 
     current_time = datetime.now()
     timestamp = current_time.strftime("%Y%m%d_%H%M%S")
@@ -289,64 +266,152 @@ def calculate_metrics(labels,preds,preds_ema,video_ids,test,dir):
 
     labels = np.round(labels)
 
-    datasets = ["cholec80","endoscapes","cholect50"]
+    if 'cholec80' in cfg.checkpoint:
+        dataset = 'cholec80'
+    elif 'endo' in cfg.checkpoint:
+        dataset = 'endoscapes'
+    else:
+        dataset = 'cholect50'
 
-    for dataset in datasets:
+    print(f"Processing dataset: {dataset}")
 
-        print(f"Processing dataset: {dataset}")
+    if dataset == "cholec80":
+        a = process_cholec80(labels,preds,preds_ema,video_ids,test)
+    if dataset == 'endoscapes':
+        a = process_endo(labels,preds,preds_ema,video_ids,test)
+    if dataset == "cholect50":
+        a = process_cholect50(labels,preds,preds_ema,video_ids,test)
 
-        mask = np.array([dataset in v for v in video_ids])
-
-        filtered_labels  = labels[mask]
-        filtered_preds = preds[mask]
-        filtered_preds_ema = preds_ema[mask]
-        filtered_video_ids = video_ids[mask]
-
-        if dataset == "cholec80":
-            a = process_cholec80(filtered_labels,filtered_preds,filtered_preds_ema,filtered_video_ids,test)
-        if dataset == "endoscapes":
-            b = process_endo(filtered_labels,filtered_preds,filtered_preds_ema,filtered_video_ids,test)
-        if dataset == 'cholect50':
-            c = process_cholect50(filtered_labels,filtered_preds,filtered_preds_ema,filtered_video_ids,test)
-
-    save_results(a,b,c,test,dir)
+    save_results(a,test,dir)
 
     print("Calculating metrics done")
 
-def test(trainer,ckpt,dir,criterion) -> None:
+def save_best(trainer, if_ema_better: bool) -> None:
+    if if_ema_better:
+        torch.save(trainer.ema.module.state_dict(),
+                    os.path.join(cfg.checkpoint, 'model-highest.ckpt'))
+    else:
+        torch.save(trainer.model.state_dict(),
+                    os.path.join(cfg.checkpoint, 'model-highest.ckpt'))
+    torch.save(trainer.model.state_dict(),
+                os.path.join(cfg.checkpoint, 'model-highest-regular.ckpt'))
+    torch.save(trainer.ema.module.state_dict(),
+                os.path.join(cfg.checkpoint, 'model-highest-ema.ckpt'))
 
-    state_dict = torch.load(ckpt)
-    new_state_dict = {}
-    for key, value in state_dict.items():
-        if 'child_prompt_learner' in key:
-            new_key = key.replace('child_prompt_learner', 'prompt_learner')
-        else:
-            new_key = key
+def validate(trainer, epoch: int,dir) -> Tuple[float, bool]:
 
-        new_state_dict[new_key] = value
-
-    trainer.model.load_state_dict(
-        new_state_dict, strict=True)
     trainer.model.eval()
-    criterion = criterion.to('cpu')
+    logger.info("Start validation...")
+    sigmoid = torch.nn.Sigmoid()
+    preds_regular = []
+    preds_ema = []
+    all_vids = []
+    targets = []
+    for _, (input, target, vid) in enumerate(trainer.val_loader):
+        target = target
+        # compute output
+        with torch.no_grad():
+            with autocast():
+                output_logits = trainer.model(input.cuda())
+                output_ema_logits = trainer.ema.module(input.cuda())
+                output_regular = sigmoid(output_logits)
+                output_ema = sigmoid(output_ema_logits)
 
-    print("Start test...")
+                # for mAP calculation
+        preds_regular.append(output_regular.cpu().detach().numpy())
+        preds_ema.append(output_ema.cpu().detach().numpy())
+        targets.append(target.cpu().detach().numpy())
+        all_vids.append(vid)
+
+    all_labels = np.concatenate(targets, axis=0)
+    all_predictions_reg = np.concatenate(preds_regular, axis=0)
+    all_predictions_ema = np.concatenate(preds_ema, axis=0)
+    all_vids = np.concatenate([np.array(sublist) for sublist in all_vids])
+    calculate_metrics(all_labels,all_predictions_reg,all_predictions_ema,all_vids,False,dir)
+
+    mAP_score_regular = mAP(all_labels,all_predictions_reg)
+    mAP_score_ema = mAP(all_labels,all_predictions_ema)
+    logger.info("mAP score regular {:.2f}, mAP score EMA {:.2f}".format(
+        mAP_score_regular, mAP_score_ema))
+    mAP_max = max(mAP_score_regular, mAP_score_ema)
+    if mAP_score_ema >= mAP_score_regular:
+        if_ema_better_mAP = True
+    else:
+        if_ema_better_mAP = False
+
+    return mAP_max, if_ema_better_mAP
+
+def train(trainer,dir) -> None:
+    # set optimizer
+    criterion = SPLC()
+    parameters = add_weight_decay(trainer.model, cfg.weight_decay)
+    max_lr = [cfg.lr, cfg.lr, cfg.gcn_lr, cfg.gcn_lr]
+    optimizer = torch.optim.Adam(
+        params=parameters, lr=cfg.lr,
+        weight_decay=0)  # true wd, filter_bias_and_bn
+    steps_per_epoch = len(trainer.train_loader)
+    scheduler = lr_scheduler.OneCycleLR(  # type: ignore
+        optimizer,
+        max_lr=max_lr,
+        steps_per_epoch=steps_per_epoch,
+        epochs=cfg.total_epochs,  # type: ignore
+        pct_start=0.2)
+
+    highest_mAP = 0
+    scaler = GradScaler()
+    best_epoch = 0
+    trainer.model.train()
+    for epoch in range(cfg.epochs):
+        for i, (input, target,_) in enumerate(trainer.train_loader):
+            target = target.cuda()  # (batch,3,num_classes)
+            # target = target.max(dim=1)[0]
+            if 'cholec80' in cfg.checkpoint:
+                target = torch.argmax(target, dim=1)
+            loss = trainer.train(input, target, criterion, epoch, i)
+
+            trainer.model.zero_grad()
+            scaler.scale(loss).backward()  # type: ignore
+            scaler.step(optimizer)
+            scaler.update()
+            scheduler.step()
+            trainer.ema.update(trainer.model)
+            if i % 100 == 0:
+                logger.info('Epoch [{}/{}], Step [{}/{}], LR {:.1e}, Loss: {:.1f}'
+                    .format(epoch, cfg.epochs, str(i).zfill(3), str(steps_per_epoch).zfill(3), # noqa
+                            scheduler.get_last_lr()[0], \
+                            loss.item()))
+
+        mAP_score, if_ema_better = validate(trainer, epoch,dir)
+
+        if mAP_score > highest_mAP:
+            highest_mAP = mAP_score
+            best_epoch = epoch
+            save_best(trainer, if_ema_better)
+        logger.info(
+            'current_mAP = {:.2f}, highest_mAP = {:.2f}, best_epoch={}\n'.
+            format(mAP_score, highest_mAP, best_epoch))
+        logger.info("Save text embeddings done")
+        trainer.model.train()
+
+def test(trainer,dir) -> None:
+    # get model-highest.ckpt
+    trainer.model.load_state_dict(
+        torch.load(f"{cfg.checkpoint}/model-highest.ckpt"), strict=True)
+    trainer.model.eval()
+
+    logger.info("Start test...")
 
     sigmoid = torch.sigmoid
 
     preds = []
     targets = []
     all_vids = []
-    losses = []
     for i, (input, target, vid) in enumerate(trainer.test_loader):
         target = target.cuda()
         # compute output
         with torch.no_grad():
-            output_logits = trainer.model(input.cuda())
-            output = sigmoid(output_logits)
+            output = sigmoid(trainer.model(input.cuda()))
 
-        loss , _ = criterion(output_logits,target,20)
-        losses.append(loss)
         # for mAP calculation
         preds.append(output.cpu().detach().numpy())
         targets.append(target.cpu().detach().numpy())
@@ -358,47 +423,21 @@ def test(trainer,ckpt,dir,criterion) -> None:
     all_vids = np.concatenate([np.array(sublist) for sublist in all_vids])
     calculate_metrics(all_labels,all_predictions_reg,all_predictions_ema,all_vids,True,dir)
 
-    mAP_calc = mAP(all_labels,all_predictions_reg)
-    loss_calc = sum(losses)/len(losses)
-    print(f"Loss: {loss_calc}, mAP: {mAP_calc}")
+    logger.info("Testing done...")
 
-    print("Testing done...")
 
 def main():
-    os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
     warnings.filterwarnings("ignore", category=UserWarning) 
     warnings.filterwarnings("ignore", category=RuntimeWarning) 
-    s = cfg.seed
-    torch.manual_seed(s)
-    torch.cuda.manual_seed(s)
-    random.seed(s)
-    np.random.seed(s)
-    print(f'Seed set to {s}')
-    torch.use_deterministic_algorithms(True)
-    torch.backends.cudnn.benchmark = False
-
-    loss_dict = {
-        'SPLC': SPLC,
-        'GRLoss': GRLoss,
-        'Hill': Hill,
-        'BCE': lambda: AsymmetricLossOptimized(gamma_neg=0, gamma_pos=0, clip=0),
-        'Focal': lambda: AsymmetricLossOptimized(gamma_neg=2, gamma_pos=2, clip=0),
-        'ASL': lambda: AsymmetricLossOptimized(gamma_neg=4, gamma_pos=0, clip=0.05),
-        'WAN': WAN,
-        'VLPL_Loss': VLPL_Loss,
-        'Modified_VLPL': Modified_VLPL,
-        'iWAN': iWAN,
-        'G-AN': G_AN,
-        'LL-R': lambda: LL(scheme='LL-R'),
-        'LL-Ct': LL,
-        'Weighted_Hill': Weighted_Hill
-    }
-    criterion = loss_dict.get(cfg.loss, lambda: None)()
-    print(f'Checkpoint: {cfg.ckpt}')
-    print(f'Directory: {cfg.test_dir}')
-    print(f'Loss: {cfg.test_loss}')
-    trainer = MMLSurgAdaptTrainer()
-    test(trainer,cfg.ckpt,cfg.test_dir,criterion)
+    # torch.manual_seed(0)
+    # random.seed(0)
+    # np.random.seed(0)
+    #torch.cuda.set_device(1)
+    trainer = HSPNetTrainer()
+    dir = cfg.dir
+    print(dir)
+    train(trainer,dir)
+    test(trainer,dir)
 
 if __name__ == '__main__':
     main()

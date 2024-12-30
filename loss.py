@@ -477,6 +477,31 @@ class VLPL_Loss(nn.Module):
             loss = loss_positive + loss_neg
 
         return loss.sum(), targets
+
+class Modified_VLPL(nn.Module):
+
+    def __init__(
+        self,
+        alpha: float = 0.2,
+        num_classes: int = 110
+    ) -> None:
+        super(Modified_VLPL, self).__init__()
+        self.alpha = alpha
+        self.ncls = num_classes
+    
+    def neg_log(self,v):
+        return - torch.log(v + 1e-7)
+    
+    def forward(self, logits: torch.Tensor, targets: torch.Tensor, epoch):
+
+        preds = torch.sigmoid(logits)
+
+        loss_positive = targets * self.neg_log(preds)
+        loss_neg = - (1-targets) * self.alpha * (preds*self.neg_log(preds)+ (1-preds)*self.neg_log(1-preds))
+
+        loss = loss_positive + loss_neg
+
+        return loss.sum(), targets
     
 class LL(nn.Module):
 

@@ -1,0 +1,6 @@
+DATASET:
+  NAME: "cholec"
+  ROOT: "label_jsons/data1.json"
+  VAL_SPLIT: "val"
+  TEST_SPLIT: "test"
+  TRAIN_SPLIT: "train"

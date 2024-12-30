@@ -29,13 +29,13 @@ init_val_file : triplet_val_labels.json # Init labels
 init_epochs : 5
 init_lr : 1e-5
 dir : trial  # Directory to save results
-loss : Hill  # Loss function
+loss : WAN  # Loss function
 use_lfile : False  # If use label file
 getitem : False # If call random in getitem
 # Random in init if both false
 backbone : ViT-L/14
 seed: 0  # Set seed
-partial: False # For partial positive data in training
+partial: True # For partial positive data in training
 model: SurgAdapt
 #bert_path : /home/swalimbe/surgvlp_trial/Bio_ClinicalBERT  # Bert init for SurgVLP
 #vlp_weights : /home/swalimbe/surgvlp_trial/nips_v1.tar # Ckpt for SurgVLP

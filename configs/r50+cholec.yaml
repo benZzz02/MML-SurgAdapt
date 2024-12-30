@@ -36,7 +36,7 @@ getitem : False # If call random in getitem
 backbone : ViT-L/14
 seed: 0  # Set seed
 partial: False # For partial positive data in training
-model: SurgAdapt
+model: Resnet
 #bert_path : /home/swalimbe/surgvlp_trial/Bio_ClinicalBERT  # Bert init for SurgVLP
 #vlp_weights : /home/swalimbe/surgvlp_trial/nips_v1.tar # Ckpt for SurgVLP
 

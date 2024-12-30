@@ -5,7 +5,7 @@ from torchvision.transforms import RandAugment, RandomErasing, InterpolationMode
 
 from dataset import build_dataset
 from log import logger
-from model import load_clip_model, MMLSurgAdapt, Resnet, CrossModel, ViT, CLIP_for_train, VLPL
+from model import load_clip_model, MMLSurgAdapt, Resnet, CrossModel, ViT, CLIP_for_train, VLPL, HSPNet
 from surgvlp import SurgAVLP, CBertViT
 from utils import ModelEma, get_ema_co
 from typing import Optional, List, Tuple, Dict
@@ -71,7 +71,18 @@ class MMLSurgAdaptTrainer():
             logger.info("Using SurgVLP weights")
             self.model = SurgAVLP(clip_model,classnames,cfg.bert_path,cfg.vlp_weights)
         else:
-            self.model = MMLSurgAdapt(classnames, clip_model)
+            if cfg.model == 'SurgAdapt':
+                self.model = MMLSurgAdapt(classnames, clip_model)
+            elif cfg.model == 'HSPNet':
+                self.model = HSPNet(classnames,clip_model)
+            elif cfg.model == 'VLPL':
+                self.model = VLPL(classnames,clip_model)
+            elif cfg.model == 'Resnet':
+                self.model = Resnet(classnames,clip_model)
+            elif cfg.model == 'CLIP':
+                self.model = CLIP_for_train(classnames,clip_model)
+            else:
+                raise NameError
             #self.model = CBertViT(clip_model,classnames,cfg.bert_path)
         print(self.model)
         self.classnames = classnames
