@@ -1,3 +1,16 @@
+<div align="center">
+<a href="http://camma.u-strasbg.fr/">
+<img src="https://github.com/CAMMA-public/SelfSupSurg/blob/main/static/camma_logo_tr.png" width="30%">
+</a>
+</div>
+
+# **[MICCAI 2025] Procedure-Aware Surgical Video-language Pretraining with Hierarchical Knowledge Augmentation**
+_Soham Walimbe, _Britty Baby_ [Vinkle Srivastav](https://vinkle.github.io/), Nicolas Padoy_,  **MICCAI 2025** 
+
+[![arXiv](https://img.shields.io/badge/arxiv-2307.15220-red)](https://arxiv.org/abs/2507.05020)
+### MML-SurgAdapt framework
+<img src="mml_surg_adapt.png" width="1200"/>
+
 # MML - SurgAdapt
 
 This repository contains the codebase for **MML - SurgAdapt**, an adaptation of the CLIP for surgery. The project is designed for multi-task surgical computer vision and supports easy setup, training, and inference.
@@ -105,10 +118,24 @@ For Task-specific baselines, use config files for the experiments after setting 
 cd baselines/TS+multitask/
 python train.py -c configs/r50+endo.yaml
 ```
-
 For multi-task baseline:
 ```bash
 cd baselines/TS+multitask/
 python train_multitask.py
+
+## Citation
+If you use our code or models in your research, please cite with:
+```bibtex
+@article{walimbe2025adaptation,
+  title={Adaptation of Multi-modal Representation Models for Multi-task Surgical Computer Vision},
+  author={Walimbe, Soham and Baby, Britty and Srivastav, Vinkle and Padoy, Nicolas},
+  booktitle={International Conference on Medical Image Computing and Computer-Assisted Intervention},
+  year={2025},
+  organization={Springer}
+}
+```
+
+## License
+This code and models are available for non-commercial scientific research purposes as defined in the [CC BY-NC-SA 4.0](https://creativecommons.org/licenses/by-nc-sa/4.0/). By downloading and using this code you agree to the terms in the [LICENSE](LICENSE). Third-party codes are subject to their respective licenses.
 ```
 
