@@ -9,7 +9,7 @@ _Soham Walimbe, _Britty Baby_ [Vinkle Srivastav](https://vinkle.github.io/), Nic
 
 [![arXiv](https://img.shields.io/badge/arxiv-2307.15220-red)](https://arxiv.org/abs/2507.05020)
 ### MML-SurgAdapt framework
-<img src="mml_surg_adapt.png" width="1200"/>
+<img src="mml_surg_adapt.png" width="50%"/>
 
 # MML - SurgAdapt
 
@@ -122,6 +122,7 @@ For multi-task baseline:
 ```bash
 cd baselines/TS+multitask/
 python train_multitask.py
+```
 
 ## Citation
 If you use our code or models in your research, please cite with:
@@ -137,5 +138,3 @@ If you use our code or models in your research, please cite with:
 
 ## License
 This code and models are available for non-commercial scientific research purposes as defined in the [CC BY-NC-SA 4.0](https://creativecommons.org/licenses/by-nc-sa/4.0/). By downloading and using this code you agree to the terms in the [LICENSE](LICENSE). Third-party codes are subject to their respective licenses.
-```
-
