@@ -349,6 +349,14 @@ def save_best(trainer, if_ema_better: bool,dir,method) -> None:
     torch.save(trainer.ema.module.state_dict(),
                 os.path.join(cfg.checkpoint, f'{dir}/{method}/model-highest-ema.ckpt'))
 
+
+def save_epoch_checkpoint(trainer, dir: str, epoch: int) -> str:
+    epoch_dir = os.path.join(cfg.checkpoint, f"{dir}/epochs")
+    os.makedirs(epoch_dir, exist_ok=True)
+    ckpt_path = os.path.join(epoch_dir, f"epoch_{epoch}.ckpt")
+    torch.save(unwrap_model(trainer.model).state_dict(), ckpt_path)
+    return ckpt_path
+
 def validate(trainer, epoch: int, dir) -> Tuple[float, bool]:
 
     trainer.model.eval()
@@ -513,7 +521,7 @@ def save_best_init(trainer, if_ema_better,dir):
         torch.save(unwrap_model(trainer.model).state_dict(),
                     os.path.join(cfg.checkpoint, f'{dir}/init/model-highest.ckpt'))
 
-def train(trainer,dir) -> None:
+def train(trainer,dir) -> list:
     # set optimizer
     loss_dict = {
         'SPLC': SPLC,
@@ -541,6 +549,7 @@ def train(trainer,dir) -> None:
 
     highest_mAP = 0
     min_pp_loss = float('inf')
+    epoch_ckpts = []
     if cfg.val_sp:
         min_sp_loss = float('inf')
         best_epoch_sp = 0
@@ -653,6 +662,11 @@ def train(trainer,dir) -> None:
             dist.barrier()
 
         trainer.model.train()
+        if trainer.is_main_process:
+            ckpt_path = save_epoch_checkpoint(trainer, dir, epoch)
+            epoch_ckpts.append((epoch, ckpt_path))
+
+    return epoch_ckpts
 
 def test(trainer,dir) -> None:
     # get model-highest.ckpt
@@ -689,12 +703,54 @@ def test(trainer,dir) -> None:
 
     logger.info("Testing done...")
 
+def test_epoch_checkpoints(trainer, dir: str, epoch_ckpts) -> None:
+    """
+    Test all saved epoch checkpoints sequentially on rank 0.
+    """
+    if not epoch_ckpts:
+        logger.info("No epoch checkpoints found for testing.")
+        return
+
+    for epoch, ckpt_path in epoch_ckpts:
+        if not os.path.exists(ckpt_path):
+            logger.warning(f"Checkpoint missing for epoch {epoch}: {ckpt_path}")
+            continue
+
+        unwrap_model(trainer.model).load_state_dict(torch.load(ckpt_path), strict=True)
+        trainer.model.eval()
+
+        logger.info(f"Start test for epoch {epoch} ({ckpt_path})...")
+
+        sigmoid = torch.sigmoid
+
+        preds = []
+        targets = []
+        all_vids = []
+        for i, (input, target, vid) in enumerate(trainer.test_loader):
+            target = target.to(trainer.device, non_blocking=True)
+            # compute output
+            with torch.no_grad():
+                output = sigmoid(trainer.model(input.to(trainer.device, non_blocking=True)))
+
+            preds.append(output.cpu().detach().numpy())
+            targets.append(target.cpu().detach().numpy())
+            all_vids.append(vid)
+
+        all_labels = np.concatenate(targets, axis=0)
+        all_predictions_reg = np.concatenate(preds, axis=0)
+        all_predictions_ema = np.zeros_like(all_predictions_reg)
+        all_vids = np.concatenate([np.array(sublist) for sublist in all_vids])
+        calculate_metrics(all_labels,all_predictions_reg,all_predictions_ema,all_vids,True,dir,f"epoch_{epoch}")
+        logger.info(f"Epoch {epoch} test complete.")
+        logger.info("-----------------------")
+
 def makedir(dir):
     os.makedirs(f"{cfg.checkpoint}/{dir}",exist_ok=True)
     os.makedirs(f"results/{dir}",exist_ok=True)
     for method in cfg.val_methods:
         os.makedirs(f"{cfg.checkpoint}/{dir}/{method}",exist_ok=True)
     os.makedirs(f"{cfg.checkpoint}/{dir}/init",exist_ok=True)
+    os.makedirs(f"{cfg.checkpoint}/{dir}/epochs",exist_ok=True)
 
 def train_3_loaders(trainer,d1,d2,d3,optimizer,epoch,criterion,scaler):
 
@@ -762,9 +818,10 @@ def main():
         if trainer.distributed:
             dist.barrier()
     else:
-        train(trainer,dir)
+        epoch_ckpts = train(trainer,dir)
         if trainer.is_main_process:
             test(trainer,dir)
+            test_epoch_checkpoints(trainer, dir, epoch_ckpts)
         if trainer.distributed:
             dist.barrier()
     cleanup_distributed(distributed)
