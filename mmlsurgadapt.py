@@ -14,8 +14,13 @@ from config import cfg  # isort:skip
 
 class MMLSurgAdaptTrainer():
 
-    def __init__(self) -> None:
+    def __init__(self, device: torch.device, distributed: bool = False, rank: int = 0, world_size: int = 1) -> None:
         super().__init__()
+        self.device = device
+        self.distributed = distributed
+        self.rank = rank
+        self.world_size = world_size
+        self.is_main_process = (not distributed) or rank == 0
 
         clip_model, _ = load_clip_model()
         # image_size = clip_model.visual.input_resolution
@@ -42,17 +47,29 @@ class MMLSurgAdaptTrainer():
         if cfg.perform_init:
             if cfg.val_sp:
                 train_loader, val_loader, val_sp_loader, test_loader, init_train_loader, init_val_loader = build_dataset(train_preprocess,
-                                                        val_preprocess)
+                                                        val_preprocess,
+                                                        distributed=self.distributed,
+                                                        rank=self.rank,
+                                                        world_size=self.world_size)
             else:
                 train_loader, val_loader, test_loader, init_train_loader, init_val_loader = build_dataset(train_preprocess,
-                                                        val_preprocess)
+                                                        val_preprocess,
+                                                        distributed=self.distributed,
+                                                        rank=self.rank,
+                                                        world_size=self.world_size)
         else:
             if cfg.val_sp:
                 train_loader, val_loader, val_sp_loader, test_loader = build_dataset(train_preprocess,
-                                                        val_preprocess)
+                                                        val_preprocess,
+                                                        distributed=self.distributed,
+                                                        rank=self.rank,
+                                                        world_size=self.world_size)
             else:
                 train_loader, val_loader, test_loader = build_dataset(train_preprocess,
-                                                        val_preprocess)
+                                                        val_preprocess,
+                                                        distributed=self.distributed,
+                                                        rank=self.rank,
+                                                        world_size=self.world_size)
 
         self.train_loader = train_loader
         self.val_loader = val_loader
@@ -95,14 +112,25 @@ class MMLSurgAdaptTrainer():
         #     if param.requires_grad:
         #         print(name)
 
-        self.model.cuda()
+        self.model.to(self.device)
+        self.model_without_ddp = self.model
         ema_co = get_ema_co()
         logger.info(f"EMA CO: {ema_co}")
         self.ema = ModelEma(self.model, ema_co)  # 0.9997^641=0.82
+        if self.distributed:
+            device_id = self.device.index if self.device.type == "cuda" else None
+            self.model = torch.nn.parallel.DistributedDataParallel(
+                self.model,
+                device_ids=None if device_id is None else [device_id],
+                output_device=device_id,
+                find_unused_parameters=False,
+                broadcast_buffers=True,
+            )
+            self.model_without_ddp = self.model.module
     
     def train(self, input, target, criterion, epoch, epoch_i) -> torch.Tensor:
         image = input
-        image = image.cuda()
+        image = image.to(self.device, non_blocking=True)
         with autocast():  # mixed precision
             output = self.model(
                 image).float()  # sigmoid will be done in loss !
