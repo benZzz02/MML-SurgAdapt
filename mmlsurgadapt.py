@@ -124,7 +124,7 @@ class MMLSurgAdaptTrainer():
                 device_ids=None if device_id is None else [device_id],
                 output_device=device_id,
                 find_unused_parameters=True,
-                broadcast_buffers=True,
+                broadcast_buffers=False,
             )
             self.model_without_ddp = self.model.module
     

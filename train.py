@@ -5,7 +5,7 @@ import numpy as np
 from sklearn.metrics import f1_score, average_precision_score
 from statistics import mean
 import ivtmetrics
-from datetime import datetime
+from datetime import datetime, timedelta
 import json
 import random
 import torch.nn as nn
@@ -31,7 +31,13 @@ def setup_distributed() -> Tuple[bool, int, int, int, torch.device]:
         world_size = int(os.environ["WORLD_SIZE"])
         local_rank = int(os.environ.get("LOCAL_RANK", 0))
         torch.cuda.set_device(local_rank)
-        dist.init_process_group(backend="nccl", init_method="env://", rank=rank, world_size=world_size)
+        dist.init_process_group(
+            backend="nccl",
+            init_method="env://",
+            rank=rank,
+            world_size=world_size,
+            timeout=timedelta(hours=6),
+        )
         device = torch.device("cuda", local_rank)
         return True, rank, world_size, local_rank, device
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
