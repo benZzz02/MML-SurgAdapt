@@ -11,9 +11,11 @@ import random
 import torch.nn as nn
 
 import torch
-from torch.cuda.amp import GradScaler, autocast  # type: ignore
+from torch import amp  # type: ignore
 import torch.nn.functional
 from torch.optim import lr_scheduler
+
+import torch.distributed as dist
 
 from log import logger
 from loss import SPLC, GRLoss, Hill, AsymmetricLossOptimized, WAN, VLPL_Loss, iWAN, G_AN, LL, Weighted_Hill, Modified_VLPL
@@ -22,6 +24,27 @@ from utils import AverageMeter, add_weight_decay, mAP
 import warnings
 
 from config import cfg  # isort:skip
+
+def setup_distributed() -> Tuple[bool, int, int, int, torch.device]:
+    if "RANK" in os.environ and "WORLD_SIZE" in os.environ:
+        rank = int(os.environ["RANK"])
+        world_size = int(os.environ["WORLD_SIZE"])
+        local_rank = int(os.environ.get("LOCAL_RANK", 0))
+        torch.cuda.set_device(local_rank)
+        dist.init_process_group(backend="nccl", init_method="env://", rank=rank, world_size=world_size)
+        device = torch.device("cuda", local_rank)
+        return True, rank, world_size, local_rank, device
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    return False, 0, 1, 0, device
+
+
+def cleanup_distributed(distributed: bool) -> None:
+    if distributed and dist.is_initialized():
+        dist.destroy_process_group()
+
+
+def unwrap_model(model: torch.nn.Module) -> torch.nn.Module:
+    return model.module if hasattr(model, "module") else model
 
 def process_cholec80(true,pred,pred_ema,video_ids,test):
 
@@ -319,12 +342,20 @@ def save_best(trainer, if_ema_better: bool,dir,method) -> None:
         torch.save(trainer.ema.module.state_dict(),
                     os.path.join(cfg.checkpoint, f'{dir}/{method}/model-highest.ckpt'))
     else:
-        torch.save(trainer.model.state_dict(),
+        torch.save(unwrap_model(trainer.model).state_dict(),
                     os.path.join(cfg.checkpoint, f'{dir}/{method}/model-highest.ckpt'))
-    torch.save(trainer.model.state_dict(),
+    torch.save(unwrap_model(trainer.model).state_dict(),
                 os.path.join(cfg.checkpoint, f'{dir}/{method}/model-highest-regular.ckpt'))
     torch.save(trainer.ema.module.state_dict(),
                 os.path.join(cfg.checkpoint, f'{dir}/{method}/model-highest-ema.ckpt'))
+
+
+def save_epoch_checkpoint(trainer, dir: str, epoch: int) -> str:
+    epoch_dir = os.path.join(cfg.checkpoint, f"{dir}/epochs")
+    os.makedirs(epoch_dir, exist_ok=True)
+    ckpt_path = os.path.join(epoch_dir, f"epoch_{epoch}.ckpt")
+    torch.save(unwrap_model(trainer.model).state_dict(), ckpt_path)
+    return ckpt_path
 
 def validate(trainer, epoch: int, dir) -> Tuple[float, bool]:
 
@@ -357,12 +388,12 @@ def validate(trainer, epoch: int, dir) -> Tuple[float, bool]:
     losses = []
     losses_ema = []
     for _, (input, target, vid) in enumerate(trainer.val_loader):
-        target = target.cuda()
+        target = target.to(trainer.device, non_blocking=True)
         # compute output
         with torch.no_grad():
-            with autocast():
-                output_logits = trainer.model(input.cuda())
-                output_ema_logits = trainer.ema.module(input.cuda())
+            with amp.autocast(device_type="cuda"):
+                output_logits = trainer.model(input.to(trainer.device, non_blocking=True))
+                output_ema_logits = trainer.ema.module(input.to(trainer.device, non_blocking=True))
                 output_regular = sigmoid(output_logits)
                 output_ema = sigmoid(output_ema_logits)
 
@@ -417,12 +448,12 @@ def validate(trainer, epoch: int, dir) -> Tuple[float, bool]:
         losses = []
         losses_ema = []
         for _, (input, target, vid) in enumerate(trainer.val_sp_loader):
-            target = target.cuda()
+            target = target.to(trainer.device, non_blocking=True)
             # compute output
             with torch.no_grad():
-                with autocast():
-                    output_logits = trainer.model(input.cuda())
-                    output_ema_logits = trainer.ema.module(input.cuda())
+                with amp.autocast(device_type="cuda"):
+                    output_logits = trainer.model(input.to(trainer.device, non_blocking=True))
+                    output_ema_logits = trainer.ema.module(input.to(trainer.device, non_blocking=True))
 
             loss, _ = criterion(output_logits,target,epoch)
             loss_ema, _ = criterion(output_ema_logits,target,epoch)
@@ -454,12 +485,12 @@ def init_validate(trainer,epoch:int):
     losses_ema = []
 
     for _, (input, target) in enumerate(trainer.init_val_loader):
-        target = target.cuda()
+        target = target.to(trainer.device, non_blocking=True)
         # compute output
         with torch.no_grad():
-            with autocast():
-                output_logits = trainer.model(input.cuda())
-                output_ema_logits = trainer.ema.module(input.cuda())
+            with amp.autocast(device_type="cuda"):
+                output_logits = trainer.model(input.to(trainer.device, non_blocking=True))
+                output_ema_logits = trainer.ema.module(input.to(trainer.device, non_blocking=True))
 
         loss = criterion(output_logits,target)
         loss_ema = criterion(output_ema_logits,target)
@@ -487,10 +518,10 @@ def save_best_init(trainer, if_ema_better,dir):
         torch.save(trainer.ema.module.state_dict(),
                     os.path.join(cfg.checkpoint, f'{dir}/init/model-highest.ckpt'))
     else:
-        torch.save(trainer.model.state_dict(),
+        torch.save(unwrap_model(trainer.model).state_dict(),
                     os.path.join(cfg.checkpoint, f'{dir}/init/model-highest.ckpt'))
 
-def train(trainer,dir) -> None:
+def train(trainer,dir) -> list:
     # set optimizer
     loss_dict = {
         'SPLC': SPLC,
@@ -510,7 +541,7 @@ def train(trainer,dir) -> None:
     }
     criterion = loss_dict.get(cfg.loss, lambda: None)()
     print(criterion)
-    parameters = add_weight_decay(trainer.model, cfg.weight_decay)
+    parameters = add_weight_decay(unwrap_model(trainer.model), cfg.weight_decay)
     optimizer = torch.optim.Adam(
         params=parameters, lr=cfg.lr,
         weight_decay=0)
@@ -518,10 +549,11 @@ def train(trainer,dir) -> None:
 
     highest_mAP = 0
     min_pp_loss = float('inf')
+    epoch_ckpts = []
     if cfg.val_sp:
         min_sp_loss = float('inf')
         best_epoch_sp = 0
-    scaler = GradScaler()
+    scaler = amp.GradScaler("cuda")
     best_epoch_map = 0
     best_epoch_pp = 0
     trainer.model.train()
@@ -535,11 +567,13 @@ def train(trainer,dir) -> None:
         init_steps_per_epoch = len(trainer.init_train_loader)
         
         for epoch in range(cfg.init_epochs):
+            if trainer.distributed and isinstance(trainer.init_train_loader.sampler, torch.utils.data.distributed.DistributedSampler):
+                trainer.init_train_loader.sampler.set_epoch(epoch)
             for i, (input,target) in enumerate(trainer.init_train_loader):
                 init_optimizer.zero_grad()
-                target = target.cuda()
-                image = input.cuda()
-                with autocast():  # mixed precision
+                target = target.to(trainer.device, non_blocking=True)
+                image = input.to(trainer.device, non_blocking=True)
+                with amp.autocast(device_type="cuda"):  # mixed precision
                     output = trainer.model(
                         image).float()  # sigmoid will be done in loss !
                 loss = nn.BCEWithLogitsLoss()(output,target)
@@ -547,20 +581,26 @@ def train(trainer,dir) -> None:
                 scaler.scale(loss).backward()  # type: ignore
                 scaler.step(init_optimizer)
                 scaler.update()
-                trainer.ema.update(trainer.model)
+                trainer.ema.update(trainer.model_without_ddp)
                 if i % 100 == 0:
                     logger.info('Epoch [{}/{}], Step [{}/{}], LR {:.1e}, Loss: {:.4f}'
                         .format(epoch, cfg.init_epochs, str(i).zfill(3), str(init_steps_per_epoch).zfill(3),cfg.init_lr,loss.item())) # noqa
                     
-            min_loss, is_ema_better = init_validate(trainer,epoch)
+            if trainer.distributed:
+                dist.barrier()
+            min_loss, is_ema_better = None, None
+            if trainer.is_main_process:
+                min_loss, is_ema_better = init_validate(trainer,epoch)
 
-            if min_loss < min_init_loss:
-                min_init_loss = min_loss
-                best_epoch_init = epoch
-                save_best_init(trainer, is_ema_better,dir)
-            logger.info(
-                'current_init_loss = {:.2f}, min_init_loss = {:.2f}, best_epoch={}, is_ema_better={}\n'.
-                format(min_loss, min_init_loss, best_epoch_init, is_ema_better))
+                if min_loss < min_init_loss:
+                    min_init_loss = min_loss
+                    best_epoch_init = epoch
+                    save_best_init(trainer, is_ema_better,dir)
+                logger.info(
+                    'current_init_loss = {:.2f}, min_init_loss = {:.2f}, best_epoch={}, is_ema_better={}\n'.
+                    format(min_loss, min_init_loss, best_epoch_init, is_ema_better))
+            if trainer.distributed:
+                dist.barrier()
             trainer.model.train()
                     
         trainer.model.load_state_dict(
@@ -568,9 +608,11 @@ def train(trainer,dir) -> None:
         trainer.model.train()
 
     for epoch in range(cfg.epochs):
+        if trainer.distributed and isinstance(trainer.train_loader.sampler, torch.utils.data.distributed.DistributedSampler):
+            trainer.train_loader.sampler.set_epoch(epoch)
         for i, (input, target, _) in enumerate(trainer.train_loader):
             optimizer.zero_grad()
-            target = target.cuda()  # (batch,3,num_classes)
+            target = target.to(trainer.device, non_blocking=True)  # (batch,3,num_classes)
             # target = target.max(dim=1)[0]
             loss = trainer.train(input, target, criterion, epoch, i)
 
@@ -578,46 +620,58 @@ def train(trainer,dir) -> None:
             scaler.scale(loss).backward()  # type: ignore
             scaler.step(optimizer)
             scaler.update()
-            trainer.ema.update(trainer.model)
+            trainer.ema.update(trainer.model_without_ddp)
             if i % 100 == 0:
                 logger.info('Epoch [{}/{}], Step [{}/{}], LR {:.1e}, Loss: {:.4f}'
                     .format(epoch, cfg.epochs, str(i).zfill(3), str(steps_per_epoch).zfill(3),cfg.lr,loss.item())) # noqa
 
-        evals = validate(trainer, epoch,dir)
+        if trainer.distributed:
+            dist.barrier()
+        evals = None
+        if trainer.is_main_process:
+            evals = validate(trainer, epoch,dir)
 
-        if evals['pp_map'] > highest_mAP:
-            highest_mAP = evals['pp_map']
-            best_epoch_map = epoch
-            save_best(trainer, evals['pp_map_if_better'],dir,'pp_map')
-        logger.info(
-            'current_mAP = {:.2f}, highest_mAP = {:.2f}, best_epoch={}, is_ema_better={}\n'.
-            format(evals['pp_map'], highest_mAP, best_epoch_map, evals['pp_map_if_better']))
-        
-        if evals['pp_loss'] < min_pp_loss:
-            min_pp_loss = evals['pp_loss']
-            best_epoch_pp = epoch
-            save_best(trainer, evals['pp_loss_if_better'],dir,'pp_loss')
-        logger.info(
-            'current_pp_loss = {:.2f}, min_pp_loss = {:.2f}, best_epoch={}, is_ema_better={}\n'.
-            format(evals['pp_loss'], min_pp_loss, best_epoch_pp, evals['pp_loss_if_better']))
-        
-        if cfg.val_sp:
-            if evals['sp_loss'] < min_sp_loss:
-                min_sp_loss = evals['sp_loss']
-                best_epoch_sp = epoch
-                save_best(trainer, evals['sp_loss_if_better'],dir,'sp_loss')
+            if evals['pp_map'] > highest_mAP:
+                highest_mAP = evals['pp_map']
+                best_epoch_map = epoch
+                save_best(trainer, evals['pp_map_if_better'],dir,'pp_map')
             logger.info(
-                'current_sp_loss = {:.2f}, min_sp_loss = {:.2f}, best_epoch={}, is_ema_better={}\n'.
-                format(evals['sp_loss'], min_sp_loss, best_epoch_sp, evals["sp_loss_if_better"]))
+                'current_mAP = {:.2f}, highest_mAP = {:.2f}, best_epoch={}, is_ema_better={}\n'.
+                format(evals['pp_map'], highest_mAP, best_epoch_map, evals['pp_map_if_better']))
             
-        logger.info("Save text embeddings done")
+            if evals['pp_loss'] < min_pp_loss:
+                min_pp_loss = evals['pp_loss']
+                best_epoch_pp = epoch
+                save_best(trainer, evals['pp_loss_if_better'],dir,'pp_loss')
+            logger.info(
+                'current_pp_loss = {:.2f}, min_pp_loss = {:.2f}, best_epoch={}, is_ema_better={}\n'.
+                format(evals['pp_loss'], min_pp_loss, best_epoch_pp, evals['pp_loss_if_better']))
+            
+            if cfg.val_sp:
+                if evals['sp_loss'] < min_sp_loss:
+                    min_sp_loss = evals['sp_loss']
+                    best_epoch_sp = epoch
+                    save_best(trainer, evals['sp_loss_if_better'],dir,'sp_loss')
+                logger.info(
+                    'current_sp_loss = {:.2f}, min_sp_loss = {:.2f}, best_epoch={}, is_ema_better={}\n'.
+                    format(evals['sp_loss'], min_sp_loss, best_epoch_sp, evals["sp_loss_if_better"]))
+                
+            logger.info("Save text embeddings done")
+
+        if trainer.distributed:
+            dist.barrier()
 
         trainer.model.train()
+        if trainer.is_main_process:
+            ckpt_path = save_epoch_checkpoint(trainer, dir, epoch)
+            epoch_ckpts.append((epoch, ckpt_path))
+
+    return epoch_ckpts
 
 def test(trainer,dir) -> None:
     # get model-highest.ckpt
     for method in cfg.val_methods:
-        trainer.model.load_state_dict(
+        unwrap_model(trainer.model).load_state_dict(
             torch.load(f"{cfg.checkpoint}/{dir}/{method}/model-highest.ckpt"), strict=True)
         trainer.model.eval()
 
@@ -629,10 +683,10 @@ def test(trainer,dir) -> None:
         targets = []
         all_vids = []
         for i, (input, target, vid) in enumerate(trainer.test_loader):
-            target = target.cuda()
+            target = target.to(trainer.device, non_blocking=True)
             # compute output
             with torch.no_grad():
-                output = sigmoid(trainer.model(input.cuda()))
+                output = sigmoid(trainer.model(input.to(trainer.device, non_blocking=True)))
 
             # for mAP calculation
             preds.append(output.cpu().detach().numpy())
@@ -649,12 +703,54 @@ def test(trainer,dir) -> None:
 
     logger.info("Testing done...")
 
+def test_epoch_checkpoints(trainer, dir: str, epoch_ckpts) -> None:
+    """
+    Test all saved epoch checkpoints sequentially on rank 0.
+    """
+    if not epoch_ckpts:
+        logger.info("No epoch checkpoints found for testing.")
+        return
+
+    for epoch, ckpt_path in epoch_ckpts:
+        if not os.path.exists(ckpt_path):
+            logger.warning(f"Checkpoint missing for epoch {epoch}: {ckpt_path}")
+            continue
+
+        unwrap_model(trainer.model).load_state_dict(torch.load(ckpt_path), strict=True)
+        trainer.model.eval()
+
+        logger.info(f"Start test for epoch {epoch} ({ckpt_path})...")
+
+        sigmoid = torch.sigmoid
+
+        preds = []
+        targets = []
+        all_vids = []
+        for i, (input, target, vid) in enumerate(trainer.test_loader):
+            target = target.to(trainer.device, non_blocking=True)
+            # compute output
+            with torch.no_grad():
+                output = sigmoid(trainer.model(input.to(trainer.device, non_blocking=True)))
+
+            preds.append(output.cpu().detach().numpy())
+            targets.append(target.cpu().detach().numpy())
+            all_vids.append(vid)
+
+        all_labels = np.concatenate(targets, axis=0)
+        all_predictions_reg = np.concatenate(preds, axis=0)
+        all_predictions_ema = np.zeros_like(all_predictions_reg)
+        all_vids = np.concatenate([np.array(sublist) for sublist in all_vids])
+        calculate_metrics(all_labels,all_predictions_reg,all_predictions_ema,all_vids,True,dir,f"epoch_{epoch}")
+        logger.info(f"Epoch {epoch} test complete.")
+        logger.info("-----------------------")
+
 def makedir(dir):
     os.makedirs(f"{cfg.checkpoint}/{dir}",exist_ok=True)
     os.makedirs(f"results/{dir}",exist_ok=True)
     for method in cfg.val_methods:
         os.makedirs(f"{cfg.checkpoint}/{dir}/{method}",exist_ok=True)
     os.makedirs(f"{cfg.checkpoint}/{dir}/init",exist_ok=True)
+    os.makedirs(f"{cfg.checkpoint}/{dir}/epochs",exist_ok=True)
 
 def train_3_loaders(trainer,d1,d2,d3,optimizer,epoch,criterion,scaler):
 
@@ -678,26 +774,27 @@ def train_3_loaders(trainer,d1,d2,d3,optimizer,epoch,criterion,scaler):
         
         images = torch.cat(all_images, dim=0)
         target = torch.cat(all_labels, dim=0)
-        trainer.train()
+        trainer.model.train()
 
         optimizer.zero_grad()
-        target = target.cuda()  # (batch,3,num_classes)
-        loss = trainer.train(input, target, criterion, epoch, i)
+        target = target.to(trainer.device, non_blocking=True)  # (batch,3,num_classes)
+        loss = trainer.train(images, target, criterion, epoch, i)
 
         trainer.model.zero_grad()
         scaler.scale(loss).backward()  # type: ignore
         scaler.step(optimizer)
         scaler.update()
-        trainer.ema.update(trainer.model)
+        trainer.ema.update(trainer.model_without_ddp)
         if i % 100 == 0:
             logger.info('Epoch [{}/{}], Step [{}/{}], LR {:.1e}, Loss: {:.4f}'
                 .format(epoch, cfg.epochs, str(i).zfill(3), str(steps_per_epoch).zfill(3),cfg.lr,loss.item())) # noqa
 
 def main():
+    distributed, rank, world_size, local_rank, device = setup_distributed()
     os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
     warnings.filterwarnings("ignore", category=UserWarning) 
     warnings.filterwarnings("ignore", category=RuntimeWarning) 
-    s = cfg.seed
+    s = cfg.seed + rank
     torch.manual_seed(s)
     torch.cuda.manual_seed(s)
     random.seed(s)
@@ -706,17 +803,28 @@ def main():
     torch.use_deterministic_algorithms(True)
     torch.backends.cudnn.benchmark = False
     dir = cfg.dir
-    makedir(dir)
-    trainer = MMLSurgAdaptTrainer()
+    if rank == 0:
+        makedir(dir)
+    if distributed:
+        dist.barrier()
+    trainer = MMLSurgAdaptTrainer(device=device, distributed=distributed, rank=rank, world_size=world_size)
     if cfg.perform_init:
         logger.info('Initialization on....')
     else:
         logger.info('No initialization....')
     if cfg.test:
-        test(trainer,dir)
+        if trainer.is_main_process:
+            test(trainer,dir)
+        if trainer.distributed:
+            dist.barrier()
     else:
-        train(trainer,dir)
-        test(trainer,dir)
+        epoch_ckpts = train(trainer,dir)
+        if trainer.is_main_process:
+            test(trainer,dir)
+            test_epoch_checkpoints(trainer, dir, epoch_ckpts)
+        if trainer.distributed:
+            dist.barrier()
+    cleanup_distributed(distributed)
 
 if __name__ == '__main__':
     main()

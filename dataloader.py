@@ -14,7 +14,7 @@ class Cholec_Val(torch.utils.data.Dataset):
 
     def __init__(self,sp,transform=None,f=False,class_num: int = -1):
 
-        self.data_path = "cholec/data"
+        self.data_path = "/data/cholecdata"
         self.transform = transform
         self.class_num = class_num
         self.is_sp = sp
@@ -28,7 +28,7 @@ class Cholec_Val(torch.utils.data.Dataset):
 
         # For cholec80
         cholec80_frames = os.path.join(self.data_path,"cholec80/frames/val")
-        cholec80_labels = os.path.join(self.data_path,"cholec80/labels/val/1fps.pickle")
+        cholec80_labels = os.path.join(self.data_path,"cholec80/labels/val/frame_phase_val.pkl")
         a = pickle.load(open(cholec80_labels,"rb"))
         invalid_80 = [42]
         for video in a.keys():
@@ -39,7 +39,7 @@ class Cholec_Val(torch.utils.data.Dataset):
             input = [(p["Frame_id"],p["Phase_gt"]) for p in a[video]]
             video_id = f"cholec80_{video}"
             for image,gt in input:
-                filename = f"{image}.jpg"
+                filename = f"{image}.png"
                 impath = os.path.join(video_folder,filename)
                 label = torch.zeros(self.class_num)
                 label[gt] = 1
@@ -143,7 +143,7 @@ class Cholec_Train(torch.utils.data.Dataset):
 
     def __init__(self,transform=None,f=False,partial=False,class_num: int = -1):
 
-        self.data_path = "cholec/data"
+        self.data_path = "/data/cholecdata"
         self.transform = transform
         self.class_num = class_num
         self.f = f
@@ -156,7 +156,7 @@ class Cholec_Train(torch.utils.data.Dataset):
 
         # For cholec80
         cholec80_frames = os.path.join(self.data_path,"cholec80/frames/train")
-        cholec80_labels = os.path.join(self.data_path,"cholec80/labels/train/1fps_100_0.pickle")
+        cholec80_labels = os.path.join(self.data_path,"cholec80/labels/train/frame_phase_train.pkl")
         a = pickle.load(open(cholec80_labels,"rb"))
         invalid_80 = [6,10,14,32]
         for video in a.keys():
@@ -167,7 +167,7 @@ class Cholec_Train(torch.utils.data.Dataset):
             input = [(p["Frame_id"],p["Phase_gt"]) for p in a[video]]
             video_id = f"cholec80_{video}"
             for image,gt in input:
-                filename = f"{image}.jpg"
+                filename = f"{image}.png"
                 impath = os.path.join(video_folder,filename)
                 label = torch.zeros(self.class_num)
                 label[gt] = 1
@@ -272,7 +272,7 @@ class Cholec_Test(torch.utils.data.Dataset):
 
     def __init__(self,transform=None,class_num: int = -1):
 
-        self.data_path = "cholec/data"
+        self.data_path = "/data/cholecdata"
         self.transform = transform
         self.class_num = class_num
         self.data = self.read_data()
@@ -283,7 +283,7 @@ class Cholec_Test(torch.utils.data.Dataset):
 
         # For cholec80
         cholec80_frames = os.path.join(self.data_path,"cholec80/frames/test")
-        cholec80_labels = os.path.join(self.data_path,"cholec80/labels/test/1fps.pickle")
+        cholec80_labels = os.path.join(self.data_path,"cholec80/labels/test/frame_phase_test.pkl")
         a = pickle.load(open(cholec80_labels,"rb"))
         valid_80 = [51, 53, 54, 55, 58, 59, 61, 63, 64, 69, 73, 74, 76, 77, 80]
         for video in a.keys():
@@ -294,7 +294,7 @@ class Cholec_Test(torch.utils.data.Dataset):
             input = [(p["Frame_id"],p["Phase_gt"]) for p in a[video]]
             video_id = f"cholec80_{video}"
             for image,gt in input:
-                filename = f"{image}.jpg"
+                filename = f"{image}.png"
                 impath = os.path.join(video_folder,filename)
                 label = torch.zeros(self.class_num)
                 label[gt] = 1
@@ -424,7 +424,10 @@ class InitData(torch.utils.data.Dataset):
 
 def build_cholec_dataset(train_preprocess: Compose,
                        val_preprocess: Compose,
-                       pin_memory=True):
+                       pin_memory=True,
+                       distributed: bool = False,
+                       rank: int = 0,
+                       world_size: int = 1):
     
     if cfg.use_lfile:
 
@@ -492,7 +495,8 @@ def build_cholec_dataset(train_preprocess: Compose,
     for _, label, _ in train_dataset.data:
         total_ones += torch.sum(label).item()  # Sum the 1s in the label tensor
     
-    print(f"Total ones: {total_ones}")
+    if (not distributed) or rank == 0:
+        print(f"Total ones: {total_ones}")
 
     def seed_worker(worker_id):
         worker_seed = torch.initial_seed() % 2**32
@@ -500,13 +504,32 @@ def build_cholec_dataset(train_preprocess: Compose,
         random.seed(worker_seed)
 
     g = torch.Generator()
-    g.manual_seed(cfg.seed)
+    g.manual_seed(cfg.seed + rank)
+
+    train_batch_size = cfg.batch_size
+    if distributed:
+        adjusted_batch = max(1, cfg.batch_size // world_size)
+        if adjusted_batch * world_size != cfg.batch_size:
+            logger.info(f"Adjusted train batch size per rank from {cfg.batch_size} to {adjusted_batch} to match single GPU global batch.")
+        train_batch_size = adjusted_batch
+
+    train_sampler = None
+    init_train_sampler = None
+    if distributed:
+        train_sampler = torch.utils.data.distributed.DistributedSampler(
+            train_dataset, num_replicas=world_size, rank=rank, shuffle=True, seed=cfg.seed
+        )
+        if cfg.perform_init:
+            init_train_sampler = torch.utils.data.distributed.DistributedSampler(
+                init_train_dataset, num_replicas=world_size, rank=rank, shuffle=True, seed=cfg.seed
+            )
 
     # Pytorch Data loader
     train_loader = torch.utils.data.DataLoader(  # type: ignore
         train_dataset,
-        batch_size=cfg.batch_size,
-        shuffle=True,
+        batch_size=train_batch_size,
+        shuffle=not distributed,
+        sampler=train_sampler,
         num_workers=cfg.workers,
         pin_memory=pin_memory,
         worker_init_fn=seed_worker,
@@ -530,9 +553,9 @@ def build_cholec_dataset(train_preprocess: Compose,
             shuffle=False,
             num_workers=cfg.workers,
             pin_memory=False,
-        worker_init_fn=seed_worker,
-        generator=g,
-        persistent_workers = True)
+            worker_init_fn=seed_worker,
+            generator=g,
+            persistent_workers = True)
         
     test_loader = torch.utils.data.DataLoader(  # type: ignore
         test_dataset,
@@ -547,13 +570,14 @@ def build_cholec_dataset(train_preprocess: Compose,
     if cfg.perform_init:
         init_train_loader = torch.utils.data.DataLoader(  # type: ignore
             init_train_dataset,
-            batch_size=cfg.batch_size,
-            shuffle=True,
+            batch_size=train_batch_size,
+            shuffle=not distributed,
+            sampler=init_train_sampler,
             num_workers=cfg.workers,
             pin_memory=pin_memory,
-        worker_init_fn=seed_worker,
-        generator=g,
-        persistent_workers = True)
+            worker_init_fn=seed_worker,
+            generator=g,
+            persistent_workers = True)
         
         init_val_loader = torch.utils.data.DataLoader(  # type: ignore
             init_val_dataset,
@@ -561,9 +585,9 @@ def build_cholec_dataset(train_preprocess: Compose,
             shuffle=False,
             num_workers=cfg.workers,
             pin_memory=False,
-        worker_init_fn=seed_worker,
-        generator=g,
-        persistent_workers = True)
+            worker_init_fn=seed_worker,
+            generator=g,
+            persistent_workers = True)
 
     logger.info("Build dataset done.")
     if cfg.perform_init:
