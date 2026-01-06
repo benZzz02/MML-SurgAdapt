@@ -11,7 +11,10 @@ from dataloader import build_cholec_dataset
 
 def build_dataset(train_preprocess: Compose,
                   val_preprocess: Compose,
-                  pin_memory=True):
+                  pin_memory=True,
+                  distributed: bool = False,
+                  rank: int = 0,
+                  world_size: int = 1):
     if "coco" in cfg.data:
         logger.info("Building coco dataset...")
         return build_coco_dataset(train_preprocess, val_preprocess, pin_memory)
@@ -27,7 +30,8 @@ def build_dataset(train_preprocess: Compose,
         return build_cub_dataset(train_preprocess, val_preprocess, pin_memory)
     elif "cholec" in cfg.data:
         logger.info("Building cholec dataset...")
-        return build_cholec_dataset(train_preprocess, val_preprocess, pin_memory)
+        return build_cholec_dataset(train_preprocess, val_preprocess, pin_memory,
+                                    distributed=distributed, rank=rank, world_size=world_size)
     else:
         assert (False)
 
@@ -168,4 +172,3 @@ def build_cub_dataset(train_preprocess: Compose,
                                              pin_memory=False)
     logger.info("Build dataset done.")
     return [train_loader, val_loader]
-
