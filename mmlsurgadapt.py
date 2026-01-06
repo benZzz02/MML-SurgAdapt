@@ -1,5 +1,5 @@
 import torch
-from torch.cuda.amp import autocast  # type: ignore
+from torch import amp  # type: ignore
 from torchvision import transforms
 from torchvision.transforms import RandAugment, RandomErasing, InterpolationMode
 
@@ -123,7 +123,7 @@ class MMLSurgAdaptTrainer():
                 self.model,
                 device_ids=None if device_id is None else [device_id],
                 output_device=device_id,
-                find_unused_parameters=False,
+                find_unused_parameters=True,
                 broadcast_buffers=True,
             )
             self.model_without_ddp = self.model.module
@@ -131,7 +131,7 @@ class MMLSurgAdaptTrainer():
     def train(self, input, target, criterion, epoch, epoch_i) -> torch.Tensor:
         image = input
         image = image.to(self.device, non_blocking=True)
-        with autocast():  # mixed precision
+        with amp.autocast(device_type="cuda"):  # mixed precision
             output = self.model(
                 image).float()  # sigmoid will be done in loss !
             

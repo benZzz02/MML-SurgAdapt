@@ -11,7 +11,7 @@ import random
 import torch.nn as nn
 
 import torch
-from torch.cuda.amp import GradScaler, autocast  # type: ignore
+from torch import amp  # type: ignore
 import torch.nn.functional
 from torch.optim import lr_scheduler
 
@@ -383,7 +383,7 @@ def validate(trainer, epoch: int, dir) -> Tuple[float, bool]:
         target = target.to(trainer.device, non_blocking=True)
         # compute output
         with torch.no_grad():
-            with autocast():
+            with amp.autocast(device_type="cuda"):
                 output_logits = trainer.model(input.to(trainer.device, non_blocking=True))
                 output_ema_logits = trainer.ema.module(input.to(trainer.device, non_blocking=True))
                 output_regular = sigmoid(output_logits)
@@ -443,7 +443,7 @@ def validate(trainer, epoch: int, dir) -> Tuple[float, bool]:
             target = target.to(trainer.device, non_blocking=True)
             # compute output
             with torch.no_grad():
-                with autocast():
+                with amp.autocast(device_type="cuda"):
                     output_logits = trainer.model(input.to(trainer.device, non_blocking=True))
                     output_ema_logits = trainer.ema.module(input.to(trainer.device, non_blocking=True))
 
@@ -480,7 +480,7 @@ def init_validate(trainer,epoch:int):
         target = target.to(trainer.device, non_blocking=True)
         # compute output
         with torch.no_grad():
-            with autocast():
+            with amp.autocast(device_type="cuda"):
                 output_logits = trainer.model(input.to(trainer.device, non_blocking=True))
                 output_ema_logits = trainer.ema.module(input.to(trainer.device, non_blocking=True))
 
@@ -544,7 +544,7 @@ def train(trainer,dir) -> None:
     if cfg.val_sp:
         min_sp_loss = float('inf')
         best_epoch_sp = 0
-    scaler = GradScaler()
+    scaler = amp.GradScaler("cuda")
     best_epoch_map = 0
     best_epoch_pp = 0
     trainer.model.train()
@@ -564,7 +564,7 @@ def train(trainer,dir) -> None:
                 init_optimizer.zero_grad()
                 target = target.to(trainer.device, non_blocking=True)
                 image = input.to(trainer.device, non_blocking=True)
-                with autocast():  # mixed precision
+                with amp.autocast(device_type="cuda"):  # mixed precision
                     output = trainer.model(
                         image).float()  # sigmoid will be done in loss !
                 loss = nn.BCEWithLogitsLoss()(output,target)
