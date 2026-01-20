@@ -5,52 +5,23 @@ import numpy as np
 from sklearn.metrics import f1_score, average_precision_score
 from statistics import mean
 import ivtmetrics
-from datetime import datetime, timedelta
+from datetime import datetime
 import json
 import random
 import torch.nn as nn
 
 import torch
-from torch import amp  # type: ignore
+from torch.cuda.amp import GradScaler, autocast  # type: ignore
 import torch.nn.functional
 from torch.optim import lr_scheduler
 
-import torch.distributed as dist
-
 from log import logger
-from loss import SPLC, GRLoss, Hill, AsymmetricLossOptimized, WAN, VLPL_Loss, iWAN, G_AN, LL, Weighted_Hill, Modified_VLPL
+from loss import SPLC, GRLoss, Hill, Hill_Ignore, AsymmetricLossOptimized, WAN, VLPL_Loss, iWAN, G_AN, LL, Weighted_Hill, Modified_VLPL
 from mmlsurgadapt import MMLSurgAdaptTrainer
-from utils import AverageMeter, add_weight_decay, mAP
+from utils import AverageMeter, add_weight_decay, mAP, compute_merge_and_save_pr
 import warnings
 
 from config import cfg  # isort:skip
-
-def setup_distributed() -> Tuple[bool, int, int, int, torch.device]:
-    if "RANK" in os.environ and "WORLD_SIZE" in os.environ:
-        rank = int(os.environ["RANK"])
-        world_size = int(os.environ["WORLD_SIZE"])
-        local_rank = int(os.environ.get("LOCAL_RANK", 0))
-        torch.cuda.set_device(local_rank)
-        dist.init_process_group(
-            backend="nccl",
-            init_method="env://",
-            rank=rank,
-            world_size=world_size,
-            timeout=timedelta(hours=6),
-        )
-        device = torch.device("cuda", local_rank)
-        return True, rank, world_size, local_rank, device
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    return False, 0, 1, 0, device
-
-
-def cleanup_distributed(distributed: bool) -> None:
-    if distributed and dist.is_initialized():
-        dist.destroy_process_group()
-
-
-def unwrap_model(model: torch.nn.Module) -> torch.nn.Module:
-    return model.module if hasattr(model, "module") else model
 
 def process_cholec80(true,pred,pred_ema,video_ids,test):
 
@@ -348,20 +319,21 @@ def save_best(trainer, if_ema_better: bool,dir,method) -> None:
         torch.save(trainer.ema.module.state_dict(),
                     os.path.join(cfg.checkpoint, f'{dir}/{method}/model-highest.ckpt'))
     else:
-        torch.save(unwrap_model(trainer.model).state_dict(),
+        torch.save(trainer.model.state_dict(),
                     os.path.join(cfg.checkpoint, f'{dir}/{method}/model-highest.ckpt'))
-    torch.save(unwrap_model(trainer.model).state_dict(),
+    torch.save(trainer.model.state_dict(),
                 os.path.join(cfg.checkpoint, f'{dir}/{method}/model-highest-regular.ckpt'))
     torch.save(trainer.ema.module.state_dict(),
                 os.path.join(cfg.checkpoint, f'{dir}/{method}/model-highest-ema.ckpt'))
 
-
-def save_epoch_checkpoint(trainer, dir: str, epoch: int) -> str:
+def save_epoch_checkpoint(trainer, dir: str, epoch: int) -> Tuple[int, str, str]:
     epoch_dir = os.path.join(cfg.checkpoint, f"{dir}/epochs")
     os.makedirs(epoch_dir, exist_ok=True)
-    ckpt_path = os.path.join(epoch_dir, f"epoch_{epoch}.ckpt")
-    torch.save(unwrap_model(trainer.model).state_dict(), ckpt_path)
-    return ckpt_path
+    reg_path = os.path.join(epoch_dir, f"epoch_{epoch}_regular.ckpt")
+    ema_path = os.path.join(epoch_dir, f"epoch_{epoch}_ema.ckpt")
+    torch.save(trainer.model.state_dict(), reg_path)
+    torch.save(trainer.ema.module.state_dict(), ema_path)
+    return epoch, reg_path, ema_path
 
 def validate(trainer, epoch: int, dir) -> Tuple[float, bool]:
 
@@ -372,6 +344,7 @@ def validate(trainer, epoch: int, dir) -> Tuple[float, bool]:
         'SPLC': SPLC,
         'GRLoss': GRLoss,
         'Hill': Hill,
+        'Hill_Ignore': Hill_Ignore,
         'BCE': lambda: AsymmetricLossOptimized(gamma_neg=0, gamma_pos=0, clip=0),
         'Focal': lambda: AsymmetricLossOptimized(gamma_neg=2, gamma_pos=2, clip=0),
         'ASL': lambda: AsymmetricLossOptimized(gamma_neg=4, gamma_pos=0, clip=0.05),
@@ -397,9 +370,13 @@ def validate(trainer, epoch: int, dir) -> Tuple[float, bool]:
         target = target.to(trainer.device, non_blocking=True)
         # compute output
         with torch.no_grad():
-            with amp.autocast(device_type="cuda"):
+            with autocast():
                 output_logits = trainer.model(input.to(trainer.device, non_blocking=True))
+                if isinstance(output_logits, tuple):
+                    output_logits, _ = output_logits
                 output_ema_logits = trainer.ema.module(input.to(trainer.device, non_blocking=True))
+                if isinstance(output_ema_logits, tuple):
+                    output_ema_logits, _ = output_ema_logits
                 output_regular = sigmoid(output_logits)
                 output_ema = sigmoid(output_ema_logits)
 
@@ -457,9 +434,13 @@ def validate(trainer, epoch: int, dir) -> Tuple[float, bool]:
             target = target.to(trainer.device, non_blocking=True)
             # compute output
             with torch.no_grad():
-                with amp.autocast(device_type="cuda"):
+                with autocast():
                     output_logits = trainer.model(input.to(trainer.device, non_blocking=True))
+                    if isinstance(output_logits, tuple):
+                        output_logits, _ = output_logits
                     output_ema_logits = trainer.ema.module(input.to(trainer.device, non_blocking=True))
+                    if isinstance(output_ema_logits, tuple):
+                        output_ema_logits, _ = output_ema_logits
 
             loss, _ = criterion(output_logits,target,epoch)
             loss_ema, _ = criterion(output_ema_logits,target,epoch)
@@ -494,9 +475,13 @@ def init_validate(trainer,epoch:int):
         target = target.to(trainer.device, non_blocking=True)
         # compute output
         with torch.no_grad():
-            with amp.autocast(device_type="cuda"):
+            with autocast():
                 output_logits = trainer.model(input.to(trainer.device, non_blocking=True))
+                if isinstance(output_logits, tuple):
+                    output_logits, _ = output_logits
                 output_ema_logits = trainer.ema.module(input.to(trainer.device, non_blocking=True))
+                if isinstance(output_ema_logits, tuple):
+                    output_ema_logits, _ = output_ema_logits
 
         loss = criterion(output_logits,target)
         loss_ema = criterion(output_ema_logits,target)
@@ -524,7 +509,7 @@ def save_best_init(trainer, if_ema_better,dir):
         torch.save(trainer.ema.module.state_dict(),
                     os.path.join(cfg.checkpoint, f'{dir}/init/model-highest.ckpt'))
     else:
-        torch.save(unwrap_model(trainer.model).state_dict(),
+        torch.save(trainer.model.state_dict(),
                     os.path.join(cfg.checkpoint, f'{dir}/init/model-highest.ckpt'))
 
 def train(trainer,dir) -> list:
@@ -533,6 +518,7 @@ def train(trainer,dir) -> list:
         'SPLC': SPLC,
         'GRLoss': GRLoss,
         'Hill': Hill,
+        'Hill_Ignore': Hill_Ignore,
         'BCE': lambda: AsymmetricLossOptimized(gamma_neg=0, gamma_pos=0, clip=0),
         'Focal': lambda: AsymmetricLossOptimized(gamma_neg=2, gamma_pos=2, clip=0),
         'ASL': lambda: AsymmetricLossOptimized(gamma_neg=4, gamma_pos=0, clip=0.05),
@@ -547,7 +533,7 @@ def train(trainer,dir) -> list:
     }
     criterion = loss_dict.get(cfg.loss, lambda: None)()
     print(criterion)
-    parameters = add_weight_decay(unwrap_model(trainer.model), cfg.weight_decay)
+    parameters = add_weight_decay(trainer.model, cfg.weight_decay)
     optimizer = torch.optim.Adam(
         params=parameters, lr=cfg.lr,
         weight_decay=0)
@@ -559,7 +545,7 @@ def train(trainer,dir) -> list:
     if cfg.val_sp:
         min_sp_loss = float('inf')
         best_epoch_sp = 0
-    scaler = amp.GradScaler("cuda")
+    scaler = GradScaler()
     best_epoch_map = 0
     best_epoch_pp = 0
     trainer.model.train()
@@ -573,13 +559,11 @@ def train(trainer,dir) -> list:
         init_steps_per_epoch = len(trainer.init_train_loader)
         
         for epoch in range(cfg.init_epochs):
-            if trainer.distributed and isinstance(trainer.init_train_loader.sampler, torch.utils.data.distributed.DistributedSampler):
-                trainer.init_train_loader.sampler.set_epoch(epoch)
             for i, (input,target) in enumerate(trainer.init_train_loader):
                 init_optimizer.zero_grad()
                 target = target.to(trainer.device, non_blocking=True)
                 image = input.to(trainer.device, non_blocking=True)
-                with amp.autocast(device_type="cuda"):  # mixed precision
+                with autocast():  # mixed precision
                     output = trainer.model(
                         image).float()  # sigmoid will be done in loss !
                 loss = nn.BCEWithLogitsLoss()(output,target)
@@ -587,26 +571,19 @@ def train(trainer,dir) -> list:
                 scaler.scale(loss).backward()  # type: ignore
                 scaler.step(init_optimizer)
                 scaler.update()
-                trainer.ema.update(trainer.model_without_ddp)
+                trainer.ema.update(trainer.model)
                 if i % 100 == 0:
                     logger.info('Epoch [{}/{}], Step [{}/{}], LR {:.1e}, Loss: {:.4f}'
                         .format(epoch, cfg.init_epochs, str(i).zfill(3), str(init_steps_per_epoch).zfill(3),cfg.init_lr,loss.item())) # noqa
-                    
-            if trainer.distributed:
-                dist.barrier()
-            min_loss, is_ema_better = None, None
-            if trainer.is_main_process:
-                min_loss, is_ema_better = init_validate(trainer,epoch)
+            min_loss, is_ema_better = init_validate(trainer,epoch)
 
-                if min_loss < min_init_loss:
-                    min_init_loss = min_loss
-                    best_epoch_init = epoch
-                    save_best_init(trainer, is_ema_better,dir)
-                logger.info(
-                    'current_init_loss = {:.2f}, min_init_loss = {:.2f}, best_epoch={}, is_ema_better={}\n'.
-                    format(min_loss, min_init_loss, best_epoch_init, is_ema_better))
-            if trainer.distributed:
-                dist.barrier()
+            if min_loss < min_init_loss:
+                min_init_loss = min_loss
+                best_epoch_init = epoch
+                save_best_init(trainer, is_ema_better,dir)
+            logger.info(
+                'current_init_loss = {:.2f}, min_init_loss = {:.2f}, best_epoch={}, is_ema_better={}\n'.
+                format(min_loss, min_init_loss, best_epoch_init, is_ema_better))
             trainer.model.train()
                     
         trainer.model.load_state_dict(
@@ -614,8 +591,6 @@ def train(trainer,dir) -> list:
         trainer.model.train()
 
     for epoch in range(cfg.epochs):
-        if trainer.distributed and isinstance(trainer.train_loader.sampler, torch.utils.data.distributed.DistributedSampler):
-            trainer.train_loader.sampler.set_epoch(epoch)
         for i, (input, target, _) in enumerate(trainer.train_loader):
             optimizer.zero_grad()
             target = target.to(trainer.device, non_blocking=True)  # (batch,3,num_classes)
@@ -626,58 +601,49 @@ def train(trainer,dir) -> list:
             scaler.scale(loss).backward()  # type: ignore
             scaler.step(optimizer)
             scaler.update()
-            trainer.ema.update(trainer.model_without_ddp)
+            trainer.ema.update(trainer.model)
             if i % 100 == 0:
                 logger.info('Epoch [{}/{}], Step [{}/{}], LR {:.1e}, Loss: {:.4f}'
                     .format(epoch, cfg.epochs, str(i).zfill(3), str(steps_per_epoch).zfill(3),cfg.lr,loss.item())) # noqa
 
-        if trainer.distributed:
-            dist.barrier()
-        evals = None
-        if trainer.is_main_process:
-            evals = validate(trainer, epoch,dir)
+        evals = validate(trainer, epoch,dir)
 
-            if evals['pp_map'] > highest_mAP:
-                highest_mAP = evals['pp_map']
-                best_epoch_map = epoch
-                save_best(trainer, evals['pp_map_if_better'],dir,'pp_map')
+        if evals['pp_map'] > highest_mAP:
+            highest_mAP = evals['pp_map']
+            best_epoch_map = epoch
+            save_best(trainer, evals['pp_map_if_better'],dir,'pp_map')
+        logger.info(
+            'current_mAP = {:.2f}, highest_mAP = {:.2f}, best_epoch={}, is_ema_better={}\n'.
+            format(evals['pp_map'], highest_mAP, best_epoch_map, evals['pp_map_if_better']))
+        
+        if evals['pp_loss'] < min_pp_loss:
+            min_pp_loss = evals['pp_loss']
+            best_epoch_pp = epoch
+            save_best(trainer, evals['pp_loss_if_better'],dir,'pp_loss')
+        logger.info(
+            'current_pp_loss = {:.2f}, min_pp_loss = {:.2f}, best_epoch={}, is_ema_better={}\n'.
+            format(evals['pp_loss'], min_pp_loss, best_epoch_pp, evals['pp_loss_if_better']))
+        
+        if cfg.val_sp:
+            if evals['sp_loss'] < min_sp_loss:
+                min_sp_loss = evals['sp_loss']
+                best_epoch_sp = epoch
+                save_best(trainer, evals['sp_loss_if_better'],dir,'sp_loss')
             logger.info(
-                'current_mAP = {:.2f}, highest_mAP = {:.2f}, best_epoch={}, is_ema_better={}\n'.
-                format(evals['pp_map'], highest_mAP, best_epoch_map, evals['pp_map_if_better']))
+                'current_sp_loss = {:.2f}, min_sp_loss = {:.2f}, best_epoch={}, is_ema_better={}\n'.
+                format(evals['sp_loss'], min_sp_loss, best_epoch_sp, evals["sp_loss_if_better"]))
             
-            if evals['pp_loss'] < min_pp_loss:
-                min_pp_loss = evals['pp_loss']
-                best_epoch_pp = epoch
-                save_best(trainer, evals['pp_loss_if_better'],dir,'pp_loss')
-            logger.info(
-                'current_pp_loss = {:.2f}, min_pp_loss = {:.2f}, best_epoch={}, is_ema_better={}\n'.
-                format(evals['pp_loss'], min_pp_loss, best_epoch_pp, evals['pp_loss_if_better']))
-            
-            if cfg.val_sp:
-                if evals['sp_loss'] < min_sp_loss:
-                    min_sp_loss = evals['sp_loss']
-                    best_epoch_sp = epoch
-                    save_best(trainer, evals['sp_loss_if_better'],dir,'sp_loss')
-                logger.info(
-                    'current_sp_loss = {:.2f}, min_sp_loss = {:.2f}, best_epoch={}, is_ema_better={}\n'.
-                    format(evals['sp_loss'], min_sp_loss, best_epoch_sp, evals["sp_loss_if_better"]))
-                
-            logger.info("Save text embeddings done")
-
-        if trainer.distributed:
-            dist.barrier()
+        logger.info("Save text embeddings done")
 
         trainer.model.train()
-        if trainer.is_main_process:
-            ckpt_path = save_epoch_checkpoint(trainer, dir, epoch)
-            epoch_ckpts.append((epoch, ckpt_path))
+        epoch_ckpts.append(save_epoch_checkpoint(trainer, dir, epoch))
 
     return epoch_ckpts
 
 def test(trainer,dir) -> None:
     # get model-highest.ckpt
     for method in cfg.val_methods:
-        unwrap_model(trainer.model).load_state_dict(
+        trainer.model.load_state_dict(
             torch.load(f"{cfg.checkpoint}/{dir}/{method}/model-highest.ckpt"), strict=True)
         trainer.model.eval()
 
@@ -692,7 +658,10 @@ def test(trainer,dir) -> None:
             target = target.to(trainer.device, non_blocking=True)
             # compute output
             with torch.no_grad():
-                output = sigmoid(trainer.model(input.to(trainer.device, non_blocking=True)))
+                output = trainer.model(input.to(trainer.device, non_blocking=True))
+                if isinstance(output, tuple):
+                    output, _ = output
+                output = sigmoid(output)
 
             # for mAP calculation
             preds.append(output.cpu().detach().numpy())
@@ -704,49 +673,78 @@ def test(trainer,dir) -> None:
         all_predictions_ema = np.zeros_like(all_predictions_reg)
         all_vids = np.concatenate([np.array(sublist) for sublist in all_vids])
         calculate_metrics(all_labels,all_predictions_reg,all_predictions_ema,all_vids,True,dir,method)
+        compute_merge_and_save_pr(all_labels, all_predictions_reg, all_vids, dir, ckpt_path=None, test=True)
         logger.info(f"Method {method} complete.")
         logger.info("-----------------------")
 
     logger.info("Testing done...")
 
 def test_epoch_checkpoints(trainer, dir: str, epoch_ckpts) -> None:
-    """
-    Test all saved epoch checkpoints sequentially on rank 0.
-    """
     if not epoch_ckpts:
         logger.info("No epoch checkpoints found for testing.")
         return
 
-    for epoch, ckpt_path in epoch_ckpts:
-        if not os.path.exists(ckpt_path):
-            logger.warning(f"Checkpoint missing for epoch {epoch}: {ckpt_path}")
+    for epoch, reg_path, ema_path in epoch_ckpts:
+        if not os.path.exists(reg_path) or not os.path.exists(ema_path):
+            logger.warning(f"Checkpoint missing for epoch {epoch}: {reg_path} / {ema_path}")
             continue
 
-        unwrap_model(trainer.model).load_state_dict(torch.load(ckpt_path), strict=True)
-        trainer.model.eval()
-
-        logger.info(f"Start test for epoch {epoch} ({ckpt_path})...")
-
         sigmoid = torch.sigmoid
-
-        preds = []
+        preds_reg = []
+        preds_ema = []
         targets = []
         all_vids = []
-        for i, (input, target, vid) in enumerate(trainer.test_loader):
-            target = target.to(trainer.device, non_blocking=True)
-            # compute output
-            with torch.no_grad():
-                output = sigmoid(trainer.model(input.to(trainer.device, non_blocking=True)))
 
-            preds.append(output.cpu().detach().numpy())
+        trainer.model.load_state_dict(torch.load(reg_path), strict=True)
+        trainer.ema.module.load_state_dict(torch.load(ema_path), strict=True)
+        trainer.model.eval()
+        trainer.ema.module.eval()
+
+        for _, (input, target, vid) in enumerate(trainer.test_loader):
+            target = target.to(trainer.device, non_blocking=True)
+            with torch.no_grad():
+                output_reg = trainer.model(input.to(trainer.device, non_blocking=True))
+                if isinstance(output_reg, tuple):
+                    output_reg, _ = output_reg
+                output_reg = sigmoid(output_reg)
+                output_ema = trainer.ema.module(input.to(trainer.device, non_blocking=True))
+                if isinstance(output_ema, tuple):
+                    output_ema, _ = output_ema
+                output_ema = sigmoid(output_ema)
+
+            preds_reg.append(output_reg.cpu().detach().numpy())
+            preds_ema.append(output_ema.cpu().detach().numpy())
             targets.append(target.cpu().detach().numpy())
             all_vids.append(vid)
 
         all_labels = np.concatenate(targets, axis=0)
-        all_predictions_reg = np.concatenate(preds, axis=0)
-        all_predictions_ema = np.zeros_like(all_predictions_reg)
+        all_predictions_reg = np.concatenate(preds_reg, axis=0)
+        all_predictions_ema = np.concatenate(preds_ema, axis=0)
         all_vids = np.concatenate([np.array(sublist) for sublist in all_vids])
-        calculate_metrics(all_labels,all_predictions_reg,all_predictions_ema,all_vids,True,dir,f"epoch_{epoch}")
+
+        map_reg = mAP(all_labels, all_predictions_reg)
+        map_ema = mAP(all_labels, all_predictions_ema)
+        best_is_ema = map_ema >= map_reg
+        best_preds = all_predictions_ema if best_is_ema else all_predictions_reg
+        best_tag = "ema" if best_is_ema else "regular"
+
+        logger.info(
+            "Epoch %s test mAP regular %.2f, EMA %.2f (best: %s)",
+            epoch,
+            map_reg,
+            map_ema,
+            best_tag,
+        )
+        calculate_metrics(
+            all_labels,
+            best_preds,
+            np.zeros_like(best_preds),
+            all_vids,
+            True,
+            dir,
+            f"epoch_{epoch}_{best_tag}",
+        )
+        compute_merge_and_save_pr(all_labels, best_preds, all_vids, dir, ckpt_path=reg_path, test=True)
         logger.info(f"Epoch {epoch} test complete.")
         logger.info("-----------------------")
 
@@ -790,17 +788,17 @@ def train_3_loaders(trainer,d1,d2,d3,optimizer,epoch,criterion,scaler):
         scaler.scale(loss).backward()  # type: ignore
         scaler.step(optimizer)
         scaler.update()
-        trainer.ema.update(trainer.model_without_ddp)
+        trainer.ema.update(trainer.model)
         if i % 100 == 0:
             logger.info('Epoch [{}/{}], Step [{}/{}], LR {:.1e}, Loss: {:.4f}'
                 .format(epoch, cfg.epochs, str(i).zfill(3), str(steps_per_epoch).zfill(3),cfg.lr,loss.item())) # noqa
 
 def main():
-    distributed, rank, world_size, local_rank, device = setup_distributed()
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
     warnings.filterwarnings("ignore", category=UserWarning) 
     warnings.filterwarnings("ignore", category=RuntimeWarning) 
-    s = cfg.seed + rank
+    s = cfg.seed
     torch.manual_seed(s)
     torch.cuda.manual_seed(s)
     random.seed(s)
@@ -809,28 +807,18 @@ def main():
     torch.use_deterministic_algorithms(True)
     torch.backends.cudnn.benchmark = False
     dir = cfg.dir
-    if rank == 0:
-        makedir(dir)
-    if distributed:
-        dist.barrier()
-    trainer = MMLSurgAdaptTrainer(device=device, distributed=distributed, rank=rank, world_size=world_size)
+    makedir(dir)
+    trainer = MMLSurgAdaptTrainer(device=device)
     if cfg.perform_init:
         logger.info('Initialization on....')
     else:
         logger.info('No initialization....')
     if cfg.test:
-        if trainer.is_main_process:
-            test(trainer,dir)
-        if trainer.distributed:
-            dist.barrier()
+        test(trainer,dir)
     else:
         epoch_ckpts = train(trainer,dir)
-        if trainer.is_main_process:
-            test(trainer,dir)
-            test_epoch_checkpoints(trainer, dir, epoch_ckpts)
-        if trainer.distributed:
-            dist.barrier()
-    cleanup_distributed(distributed)
+        test(trainer,dir)
+        test_epoch_checkpoints(trainer, dir, epoch_ckpts)
 
 if __name__ == '__main__':
     main()

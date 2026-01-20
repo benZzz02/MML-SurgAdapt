@@ -5,7 +5,7 @@ from torchvision.transforms import RandAugment, RandomErasing, InterpolationMode
 
 from dataset import build_dataset
 from log import logger
-from model import load_clip_model, MMLSurgAdapt, Resnet, CrossModel, ViT, CLIP_for_train, VLPL, HSPNet
+from model import load_clip_model, MMLSurgAdapt, MMLSurgAdaptSCPNet, Resnet, CrossModel, ViT, CLIP_for_train, VLPL, HSPNet
 from surgvlp import SurgAVLP, CBertViT
 from utils import ModelEma, get_ema_co
 from typing import Optional, List, Tuple, Dict
@@ -90,6 +90,8 @@ class MMLSurgAdaptTrainer():
         else:
             if cfg.model == 'SurgAdapt':
                 self.model = MMLSurgAdapt(classnames, clip_model)
+            elif cfg.model == 'SCPNet':
+                self.model = MMLSurgAdaptSCPNet(classnames, clip_model)
             elif cfg.model == 'HSPNet':
                 self.model = HSPNet(classnames,clip_model)
             elif cfg.model == 'VLPL':
@@ -132,10 +134,14 @@ class MMLSurgAdaptTrainer():
         image = input
         image = image.to(self.device, non_blocking=True)
         with amp.autocast(device_type="cuda"):  # mixed precision
-            output = self.model(
-                image).float()  # sigmoid will be done in loss !
-            
-        loss, labels = criterion(output, target, epoch)
+            output = self.model(image)
+            if isinstance(output, tuple):
+                output, ignore_neg_mask = output
+            else:
+                ignore_neg_mask = None
+            output = output.float()  # sigmoid will be done in loss !
+
+        loss, labels = criterion(output, target, epoch, ignore_neg_mask)
         return loss
     
 
