@@ -381,6 +381,7 @@ def main():
         'SPLC': SPLC,
         'GRLoss': GRLoss,
         'Hill': Hill,
+        'Hill_Ignore': Hill_Ignore,
         'BCE': lambda: AsymmetricLossOptimized(gamma_neg=0, gamma_pos=0, clip=0),
         'Focal': lambda: AsymmetricLossOptimized(gamma_neg=2, gamma_pos=2, clip=0),
         'ASL': lambda: AsymmetricLossOptimized(gamma_neg=4, gamma_pos=0, clip=0.05),
