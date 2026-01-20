@@ -1,3 +1,5 @@
+import glob
+import json
 import os
 import random
 from copy import deepcopy
@@ -81,6 +83,240 @@ class AverageMeter(object):
         self.cnt += n
         self.avg = self.sum / self.cnt
         self.ema = self.ema * 0.99 + self.val * 0.01  # type: ignore
+
+
+def _downsample_curve(precision, recall, max_points=20000):
+    precision = np.asarray(precision)
+    recall = np.asarray(recall)
+    n = len(precision)
+    if n <= max_points:
+        return precision, recall
+    idx = np.linspace(0, n - 1, max_points).astype(np.int64)
+    return precision[idx], recall[idx]
+
+
+def _pr_curve_safe(y_true, y_score, max_points=20000):
+    """
+    sklearn 在没有正样本时会 warning/不稳定，这里兜底：
+    - 没有正样本：返回退化曲线 (precision=1, recall=0)
+    """
+    y_true = np.asarray(y_true).astype(np.int32)
+    y_score = np.asarray(y_score).astype(np.float32)
+
+    if y_true.sum() == 0:
+        precision = np.array([1.0], dtype=np.float32)
+        recall = np.array([0.0], dtype=np.float32)
+        return precision, recall
+
+    from sklearn.metrics import precision_recall_curve
+    precision, recall, _ = precision_recall_curve(y_true, y_score)
+    precision, recall = _downsample_curve(precision, recall, max_points=max_points)
+    return precision.astype(np.float32), recall.astype(np.float32)
+
+
+def recall_at_fixed_precision(y_true, y_score, p_target=0.90):
+    """
+    从 PR 曲线上读点：max recall s.t. precision >= p_target
+    返回 [0,1] recall
+    """
+    precision, recall = _pr_curve_safe(y_true, y_score, max_points=10**9)
+    mask = precision >= float(p_target)
+    return float(np.max(recall[mask])) if np.any(mask) else 0.0
+
+
+def micro_recall_at_fixed_precision(Y_true, Y_score, p_target=0.90):
+    return recall_at_fixed_precision(np.ravel(Y_true), np.ravel(Y_score), p_target=p_target)
+
+
+def compute_pr_sidecar(labels, preds, video_ids, pr_targets=(0.70, 0.80, 0.90), max_points=20000):
+    """
+    三个数据集都用 micro PR（各一条曲线）：
+    - 产出 micro 曲线
+    - 产出 R@Pxx_micro（固定 precision 的 recall）
+    """
+    out = {
+        "PR_targets": [float(p) for p in pr_targets],
+        "Cholec80": {},
+        "Endoscapes": {},
+        "CholecT50": {},
+    }
+
+    def build_micro(y, s):
+        y_flat = np.ravel(y).astype(np.int32)
+        s_flat = np.ravel(s).astype(np.float32)
+
+        prec, rec = _pr_curve_safe(y_flat, s_flat, max_points=max_points)
+
+        points_micro = {
+            f"R@P{int(p*100)}_micro": micro_recall_at_fixed_precision(y, s, p_target=p) * 100.0
+            for p in pr_targets
+        }
+
+        return {
+            "curve_micro": {"precision": prec, "recall": rec},
+            "points_micro": points_micro,
+        }
+
+    video_ids = np.asarray(video_ids)
+
+    mask = np.array(["cholec80" in str(v) for v in video_ids])
+    if np.any(mask):
+        y = labels[mask][:, :7]
+        s = preds[mask][:, :7]
+        out["Cholec80"] = build_micro(y, s)
+
+    mask = np.array(["endoscapes" in str(v) for v in video_ids])
+    if np.any(mask):
+        y = labels[mask][:, 7:10]
+        s = preds[mask][:, 7:10]
+        out["Endoscapes"] = build_micro(y, s)
+
+    mask = np.array(["cholect50" in str(v) for v in video_ids])
+    if np.any(mask):
+        y = labels[mask][:, 10:]
+        s = preds[mask][:, 10:]
+        out["CholecT50"] = build_micro(y, s)
+
+    return out
+
+
+def _find_latest_result_json(results_dir, test=True):
+    """
+    自动找到 results/{dir}/ 下最新的 result*.json，用它的 basename 作为 PR 文件前缀
+    """
+    folder = f"results/{results_dir}"
+    pattern = os.path.join(folder, "result_*_test.json") if test else os.path.join(folder, "result_*.json")
+    files = glob.glob(pattern)
+    if not files:
+        return None
+    return max(files, key=os.path.getmtime)
+
+
+def merge_pr_points_into_result_json(pr_data, results_dir, test=True, result_json_path=None):
+    """
+    把 R@Pxx_micro 写回 result.json：
+      data[ds]["PR_micro_points"] = {...}   # 只包含 R@Pxx_micro
+    同时写 meta：
+      data["PR_meta"] = {"PR_targets": [...]}
+    """
+    folder = f"results/{results_dir}"
+    os.makedirs(folder, exist_ok=True)
+
+    path = result_json_path or _find_latest_result_json(results_dir, test=test)
+    if not path:
+        print("[PR] result.json not found, skip merge.")
+        return None
+
+    with open(path, "r") as f:
+        data = json.load(f)
+
+    for ds in ["Cholec80", "Endoscapes", "CholecT50"]:
+        if ds in data and ds in pr_data and "points_micro" in pr_data[ds]:
+            data[ds]["PR_micro_points"] = pr_data[ds]["points_micro"]
+
+    data["PR_meta"] = {"PR_targets": pr_data.get("PR_targets", [])}
+
+    with open(path, "w") as f:
+        json.dump(data, f, indent=4)
+
+    print(f"[PR] merged points into: {path}")
+    return path
+
+
+def save_pr_npz_and_png(pr_data, results_dir, ckpt_path=None, test=True, result_json_path=None):
+    """
+    命名：跟 result.json 前缀一致（basename 去掉 .json）
+      - {prefix}_pr.npz
+      - {prefix}_pr_cholec80_micro.png
+      - {prefix}_pr_endoscapes_micro.png
+      - {prefix}_pr_cholect50_micro.png
+    """
+    folder = f"results/{results_dir}"
+    os.makedirs(folder, exist_ok=True)
+
+    res_path = result_json_path or _find_latest_result_json(results_dir, test=test)
+
+    if res_path:
+        prefix = os.path.splitext(os.path.basename(res_path))[0]
+    else:
+        from datetime import datetime
+        tag = os.path.splitext(os.path.basename(ckpt_path))[0] if ckpt_path else "unknown"
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        prefix = f"result_{ts}_{tag}" + ("_test" if test else "")
+
+    npz_path = os.path.join(folder, f"{prefix}_pr.npz")
+    arrays = {}
+
+    def pack_micro(ds_key, prefix_key):
+        if ds_key not in pr_data or "curve_micro" not in pr_data[ds_key]:
+            return
+        c = pr_data[ds_key]["curve_micro"]
+        arrays[f"{prefix_key}_micro_precision"] = c["precision"]
+        arrays[f"{prefix_key}_micro_recall"] = c["recall"]
+        for k, v in pr_data[ds_key]["points_micro"].items():
+            arrays[f"{prefix_key}_{k}"] = np.array([v], dtype=np.float32)
+
+    pack_micro("Cholec80", "cholec80")
+    pack_micro("Endoscapes", "endoscapes")
+    pack_micro("CholecT50", "cholect50")
+
+    np.savez_compressed(npz_path, **arrays)
+    print(f"[PR] saved npz: {npz_path}")
+
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    tag_for_title = os.path.splitext(os.path.basename(ckpt_path))[0] if ckpt_path else prefix
+
+    def plot_one(ds_key, title, fname_key):
+        if ds_key not in pr_data or "curve_micro" not in pr_data[ds_key]:
+            return
+        d = pr_data[ds_key]["curve_micro"]
+        plt.figure()
+        plt.plot(d["recall"], d["precision"], label="micro")
+        plt.xlabel("Recall")
+        plt.ylabel("Precision")
+        plt.title(f"{title} micro PR ({tag_for_title})")
+        plt.xlim(0, 1)
+        plt.ylim(0, 1)
+        plt.legend()
+        png_path = os.path.join(folder, f"{prefix}_pr_{fname_key}_micro.png")
+        plt.savefig(png_path, dpi=200, bbox_inches="tight")
+        plt.close()
+        print(f"[PR] saved png: {png_path}")
+
+    plot_one("Cholec80", "Cholec80", "cholec80")
+    plot_one("Endoscapes", "Endoscapes", "endoscapes")
+    plot_one("CholecT50", "CholecT50", "cholect50")
+
+    return {
+        "npz_path": npz_path,
+        "prefix": prefix,
+        "results_dir": folder,
+    }
+
+
+def compute_merge_and_save_pr(
+    labels,
+    preds,
+    video_ids,
+    results_dir,
+    ckpt_path=None,
+    test=True,
+    pr_targets=(0.70, 0.80, 0.90),
+    max_points=20000,
+):
+    """
+    一键：
+      1) compute_pr_sidecar
+      2) merge_pr_points_into_result_json
+      3) save_pr_npz_and_png
+    """
+    pr_data = compute_pr_sidecar(labels, preds, video_ids, pr_targets=pr_targets, max_points=max_points)
+    merged_path = merge_pr_points_into_result_json(pr_data, results_dir, test=test)
+    save_info = save_pr_npz_and_png(pr_data, results_dir, ckpt_path=ckpt_path, test=test, result_json_path=merged_path)
+    return pr_data, merged_path, save_info
 
 
 class CocoDetection(datasets.coco.CocoDetection):

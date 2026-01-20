@@ -1,4 +1,6 @@
 from collections import OrderedDict
+import json
+import os
 
 import torch
 import torch.nn as nn
@@ -11,6 +13,9 @@ from config import cfg
 from log import logger
 
 _tokenizer = _Tokenizer()
+
+def _cfg(name, default):
+    return getattr(cfg, name, default)
 
 def load_clip_to_cpu():
     backbone_name = cfg.backbone
@@ -288,6 +293,298 @@ class GraphConvolution(nn.Module):
         return self.__class__.__name__ + ' (' \
                + str(self.in_features) + ' -> ' \
                + str(self.out_features) + ')'
+
+class StructuredPriorPrompter(nn.Module):
+    """
+    Cos-only SPP:
+      - A_clip_cos = z @ z.t()  (≈[-1,1])
+      - If external matrix provided: A_fused = (1-lam)*A_clip_cos + lam*A_ext_cos
+      - Postprocess: (optional) intra-mutex mask + (optional) inter-cooccur mask
+                    + sim_threshold + block row-max norm + self-loop(s_reweight)
+      - Save raw CLIP text relation matrix (A_clip_cos) to npy/json if paths provided.
+    """
+
+    def __init__(self, classnames, clip_model):
+        super().__init__()
+
+        self.s_reweight = _cfg("SCP_S_REWEIGHT", _cfg("reweight_p", 0.2))
+        self.sim_threshold = _cfg("SCP_SIM_THRESHOLD", _cfg("sim_threshold", 0.05))
+
+        self.enable_intra_mutex = _cfg("SCP_ENABLE_INTRA_MUTEX_MASK", True)
+        self.enable_inter_cooccur = _cfg("SCP_ENABLE_INTER_COOCCUR_MASK", True)
+
+        if hasattr(cfg, "child_num") and cfg.child_num > 0:
+            classnames = classnames[0:cfg.child_num]
+        self.n_cls = len(classnames)
+        dtype = clip_model.dtype
+
+        self.phase_range = slice(0, 7)
+        self.view_range = slice(7, 10)
+        self.action_range = slice(10, self.n_cls)
+        self.ranges = [(0, 7), (7, 10), (10, self.n_cls)]
+
+        template = "a photo of a {}."
+        classnames_proc = [n.replace("_", " ") for n in classnames]
+        prompts = [template.format(n) for n in classnames_proc]
+        tokenized = torch.cat([clip.tokenize(p) for p in prompts])
+
+        try:
+            dev = next(clip_model.parameters()).device
+            tokenized = tokenized.to(dev)
+        except Exception:
+            pass
+
+        with torch.no_grad():
+            z = clip_model.encode_text(tokenized).type(dtype)
+        z = F.normalize(z, p=2, dim=-1)
+
+        A_cos = z @ z.t()
+        self.register_buffer("A_clip_cos", A_cos)
+
+        save_path = _cfg("SCP_SAVE_RELATION_PATH", None)
+        save_json_path = _cfg("SCP_SAVE_RELATION_JSON_PATH", None)
+        if save_path or save_json_path:
+            try:
+                mat_np = self.A_clip_cos.detach().cpu().numpy()
+                if save_path:
+                    np.save(save_path, mat_np)
+                    logger.info(f"SCP relation matrix saved to {save_path} (cos).")
+                if save_json_path:
+                    with open(save_json_path, "w", encoding="utf-8") as f:
+                        json.dump(mat_np.tolist(), f)
+                    logger.info(f"SCP relation matrix saved to {save_json_path} (cos).")
+            except Exception as e:
+                logger.warning(f"SCP relation matrix save failed: {e}")
+
+        self.use_gate = False
+        self.fuse_lam = float(_cfg("SCP_EXTERNAL_FUSE_LAMBDA", 0.5))
+
+        external_path = getattr(cfg, "SCP_EXTERNAL_MATRIX_PATH", None)
+        if external_path and os.path.isfile(external_path):
+            try:
+                ext_np = np.load(external_path, allow_pickle=False)
+                if isinstance(ext_np, np.lib.npyio.NpzFile):
+                    raise ValueError("expected .npy but got .npz")
+                ext = torch.as_tensor(ext_np, dtype=A_cos.dtype, device=A_cos.device)
+                if ext.shape != A_cos.shape:
+                    raise ValueError(f"shape mismatch: expected {A_cos.shape}, got {ext.shape}")
+            except Exception as e:
+                logger.warning(f"SCP external matrix load failed: {e}. External fusion disabled.")
+            else:
+                ext = 0.5 * (ext + ext.t())
+                ext = ext.clamp(-1.0, 1.0)
+                self.register_buffer("A_ext_cos", ext)
+                self.use_gate = True
+                logger.info(
+                    "SCP external fusion enabled (weighted): lam=%.3f, path=%s",
+                    float(self.fuse_lam),
+                    str(external_path),
+                )
+        elif external_path:
+            logger.warning(f"SCP external matrix path not found: {external_path}. External fusion disabled.")
+
+        if not self.use_gate:
+            self.register_buffer("A_star", self._postprocess_cos(self.A_clip_cos))
+
+    def _postprocess_cos(self, A_cos: torch.Tensor):
+        pr, vr, ar = self.phase_range, self.view_range, self.action_range
+        ranges = self.ranges
+
+        structure_mask = torch.ones_like(A_cos, dtype=torch.bool)
+
+        if self.enable_intra_mutex:
+            structure_mask[pr, pr] = False
+            structure_mask[vr, vr] = False
+            structure_mask[ar, ar] = False
+
+        if not self.enable_inter_cooccur:
+            structure_mask[pr, vr] = False
+            structure_mask[vr, pr] = False
+            structure_mask[pr, ar] = False
+            structure_mask[ar, pr] = False
+            structure_mask[vr, ar] = False
+            structure_mask[ar, vr] = False
+
+        structure_mask.fill_diagonal_(True)
+        A_masked = A_cos * structure_mask.float()
+
+        A_norm = torch.zeros_like(A_masked)
+        for ss, se in ranges:
+            for ts, te in ranges:
+                block = A_masked[ss:se, ts:te]
+                if block.sum() == 0:
+                    continue
+                block = torch.where(block > self.sim_threshold, block, torch.zeros_like(block))
+                block_max, _ = block.max(dim=1, keepdim=True)
+                A_norm[ss:se, ts:te] = block / (block_max + 1e-12)
+
+        diag = torch.eye(self.n_cls, dtype=torch.bool, device=A_cos.device)
+        A_norm[diag] = 0.0
+        A_norm = A_norm * (1.0 - self.s_reweight)
+        A_norm[diag] = self.s_reweight
+        return A_norm
+
+    def forward(self):
+        if not self.use_gate:
+            return self.A_star
+
+        lam = float(self.fuse_lam)
+        lam = max(0.0, min(1.0, lam))
+
+        A_fused = (1.0 - lam) * self.A_clip_cos + lam * self.A_ext_cos
+        A_fused = 0.5 * (A_fused + A_fused.t())
+        return self._postprocess_cos(A_fused)
+
+class SemanticAssociationModule(nn.Module):
+    def __init__(self, in_features, out_features):
+        super().__init__()
+        num_layers = getattr(cfg, "gcn_layers", 3)
+        mid_features = in_features * 2
+
+        layers = nn.ModuleList()
+        layers.append(GraphConvolution(in_features, mid_features))
+        for _ in range(num_layers - 2):
+            layers.append(GraphConvolution(mid_features, mid_features))
+        layers.append(GraphConvolution(mid_features, out_features))
+
+        self.gcn_layers = layers
+        self.relu = nn.LeakyReLU(0.2)
+
+    def forward(self, H0, A_star):
+        H_l = H0.float()
+        for i, layer in enumerate(self.gcn_layers):
+            A_star = A_star.to(H_l.device)
+            H_l = layer(H_l, A_star)
+            if i < len(self.gcn_layers) - 1:
+                H_l = self.relu(H_l)
+        return H0 + H_l
+
+def get_topk_related_labels(pred_idx: int, logits_row: torch.Tensor, A_star: torch.Tensor):
+    """
+    score = sigmoid(logits_row) * A_star[pred_idx]
+    In the other two big groups, each take top-k.
+    """
+    k = _cfg("SCP_TOPK_K", 1)
+    use_sigmoid = _cfg("SCP_TOPK_USE_SIGMOID", True)
+
+    n_cls = A_star.shape[0]
+    phase_range = slice(0, 7)
+    view_range = slice(7, 10)
+    action_range = slice(10, n_cls)
+
+    def in_range(i, r):
+        return r.start <= i < r.stop
+
+    if in_range(pred_idx, phase_range):
+        targets = [view_range, action_range]
+    elif in_range(pred_idx, view_range):
+        targets = [phase_range, action_range]
+    elif in_range(pred_idx, action_range):
+        targets = [phase_range, view_range]
+    else:
+        raise ValueError("pred_idx not in any group range")
+
+    conf = torch.sigmoid(logits_row) if use_sigmoid else F.softmax(logits_row, dim=-1)
+    prior = A_star[pred_idx].to(logits_row.device)
+    joint = conf * prior
+
+    results = []
+    for r in targets:
+        scores = joint[r]
+        kk = min(k, scores.numel())
+        _, rel_idx = torch.topk(scores, kk)
+        results.append((rel_idx + r.start).tolist())
+    return results
+
+def compensate_logits_by_pred_prob(logits: torch.Tensor, pred_idx: torch.Tensor, topk_related_labels: list):
+    alpha = _cfg("SCP_COMP_ALPHA", 2.0)
+    temp = _cfg("SCP_COMP_TEMP", 1.0)
+
+    logits_comp = logits.clone()
+    probs = F.softmax(logits_comp / temp, dim=-1)
+
+    B = logits_comp.shape[0]
+    for b in range(B):
+        p = probs[b, int(pred_idx[b].item())]
+        delta = alpha * p
+        for group_topk in topk_related_labels[b]:
+            for idx in group_topk:
+                logits_comp[b, idx] += delta
+    return logits_comp
+
+def build_ignore_neg_mask_from_topk(topk_related_labels: list, n_cls: int, device):
+    B = len(topk_related_labels)
+    mask = torch.zeros((B, n_cls), dtype=torch.bool, device=device)
+    for b in range(B):
+        for group_topk in topk_related_labels[b]:
+            for idx in group_topk:
+                if 0 <= idx < n_cls:
+                    mask[b, idx] = True
+    return mask
+
+class MMLSurgAdaptSCPNet(nn.Module):
+    def __init__(self, classnames, clip_model):
+        super().__init__()
+        self.image_encoder = clip_model.visual
+        self.text_encoder = TextEncoder(clip_model)
+        self.logit_scale = clip_model.logit_scale
+        self.dtype = clip_model.dtype
+
+        self.prompt_learner = PromptLearner(classnames, clip_model)
+        self.tokenized_prompts = self.prompt_learner.tokenized_prompts
+
+        self.spp = StructuredPriorPrompter(classnames, clip_model)
+
+        try:
+            feat_dim = clip_model.text_projection.shape[1]
+        except Exception:
+            feat_dim = 1024
+
+        self.sam = SemanticAssociationModule(feat_dim, feat_dim)
+
+    def encode_image(self, image, visual_adapter_func=None):
+        if visual_adapter_func is not None:
+            return self.image_encoder([image.type(self.dtype), visual_adapter_func])
+        return self.image_encoder(image.type(self.dtype))
+
+    def forward(self, image, text_features=None):
+        image_features = self.encode_image(image)
+        image_features = image_features / image_features.norm(dim=-1, keepdim=True)
+
+        child_prompts = self.prompt_learner()
+        Z = self.text_encoder(child_prompts, self.tokenized_prompts)
+
+        A_star = self.spp()
+
+        row_sum = A_star.sum(dim=1, keepdim=True)
+        A_gcn = A_star / (row_sum + 1e-12)
+
+        text_features_refined = self.sam(Z, A_gcn)
+        text_features_refined = text_features_refined / text_features_refined.norm(dim=-1, keepdim=True)
+
+        logits = 10.0 * image_features @ text_features_refined.t()
+
+        use_comp = _cfg("SCP_ENABLE_LOGIT_COMP", True)
+        use_ignore = _cfg("SCP_ENABLE_IGNORE_MASK", True)
+
+        ignore_neg_mask = None
+
+        if use_comp or use_ignore:
+            pred_idx = logits.argmax(dim=-1)
+            topk_related_labels = [
+                get_topk_related_labels(int(pred_idx[b].item()), logits[b], A_star)
+                for b in range(pred_idx.shape[0])
+            ]
+
+            if use_ignore:
+                ignore_neg_mask = build_ignore_neg_mask_from_topk(
+                    topk_related_labels, n_cls=logits.shape[1], device=logits.device
+                )
+
+            if use_comp:
+                logits = compensate_logits_by_pred_prob(logits, pred_idx, topk_related_labels)
+
+        return logits, ignore_neg_mask
 
 class GCN(nn.Module):
     def __init__(self):
