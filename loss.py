@@ -197,7 +197,8 @@ class GRLoss(nn.Module):
         mu=mu_0+(mu_max-mu_0)*epoch/(cfg.epochs)
         sigma=sigma_0+(sigma_max-sigma_0)*epoch/(cfg.epochs)
         return torch.exp(-0.5 * ((preds - mu) / sigma) ** 2)  
-    
+
+
     def forward(self,preds : torch.Tensor,label : torch.Tensor, epoch):
         preds = torch.sigmoid(preds)
         K = self.K_function(preds,epoch)
@@ -209,6 +210,43 @@ class GRLoss(nn.Module):
         main_loss=loss_mtx.sum()
         return main_loss, label
     
+
+class Hill_Ignore(nn.Module):
+
+    def __init__(
+        self,
+        lamb: float = 1.5,
+        margin: float = 1.0,
+        gamma: float = 2.0,
+        reduction: str = 'sum',
+    ) -> None:
+        super(Hill_Ignore, self).__init__()
+        self.lamb = lamb
+        self.margin = margin
+        self.gamma = gamma
+        self.reduction = reduction
+
+    def forward(self, logits, targets, epoch, ignore_neg_mask=None):
+        # logits: (N,C), targets: (N,C) 0/1
+
+        logits_margin = logits - self.margin
+        pred_pos = torch.sigmoid(logits_margin)
+        pred_neg = torch.sigmoid(logits)
+
+        pt = (1 - pred_pos) * targets + (1 - targets)
+        focal_weight = pt ** self.gamma
+
+        los_pos = targets * torch.log(pred_pos.clamp_min(1e-12))
+        los_neg = (1 - targets) * -(self.lamb - pred_neg) * pred_neg ** 2
+
+        if ignore_neg_mask is not None:
+            neg_ignore = ignore_neg_mask & (targets == 0)
+            los_neg = los_neg.masked_fill(neg_ignore, 0.0)
+
+        loss = -(los_pos + los_neg)
+        loss = loss * focal_weight
+
+        return loss.sum(), targets
 
 class Hill(nn.Module):
     r""" Hill as described in the paper "Robust Loss Design for Multi-Label Learning with Missing Labels "
