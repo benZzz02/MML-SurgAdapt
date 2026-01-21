@@ -14,7 +14,7 @@ class Cholec_Val(torch.utils.data.Dataset):
 
     def __init__(self,sp,transform=None,f=False,class_num: int = -1):
 
-        self.data_path = "/data/cholecdata"
+        self.data_path = "/root/autodl-tmp/cholecdata"
         self.transform = transform
         self.class_num = class_num
         self.is_sp = sp
@@ -143,7 +143,7 @@ class Cholec_Train(torch.utils.data.Dataset):
 
     def __init__(self,transform=None,f=False,partial=False,class_num: int = -1):
 
-        self.data_path = "/data/cholecdata"
+        self.data_path = "/root/autodl-tmp/cholecdata"
         self.transform = transform
         self.class_num = class_num
         self.f = f
@@ -272,7 +272,7 @@ class Cholec_Test(torch.utils.data.Dataset):
 
     def __init__(self,transform=None,class_num: int = -1):
 
-        self.data_path = "/data/cholecdata"
+        self.data_path = "/root/autodl-tmp/cholecdata"
         self.transform = transform
         self.class_num = class_num
         self.data = self.read_data()
