@@ -14,7 +14,7 @@ class Cholec_Val(torch.utils.data.Dataset):
 
     def __init__(self,sp,transform=None,f=False,class_num: int = -1):
 
-        self.data_path = "/data/cholecdata"
+        self.data_path = "/root/autodl-tmp/cholecdata"
         self.transform = transform
         self.class_num = class_num
         self.is_sp = sp
