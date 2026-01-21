@@ -8,3 +8,4 @@ preds.json
 env.cfg
 triplet_train_labels.json
 triplet_val_labels.json
+checkpoints/*

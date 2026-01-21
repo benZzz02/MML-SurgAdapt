@@ -4,7 +4,7 @@ checkpoint: cholec_vals/scpnet_hill_Ignore_sp    # For saving checkpoints
 log_file: scpnet_hill_Ignore_sp.txt
 model_name: scpnet
 batch_size: 128
-lr: 3e-5
+lr: 1e-5
 epochs: 10
 reweight_p: 0.2
 relation_file: cholec/word2vec_similarity_matrix.npy
